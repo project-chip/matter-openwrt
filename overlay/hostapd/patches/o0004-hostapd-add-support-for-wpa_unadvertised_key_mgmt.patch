@@ -1,0 +1,323 @@
+From 5598bd1db1d564ec456ffaaed313b5855800b652 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Fri, 10 Mar 2023 13:46:05 +1300
+Subject: [PATCH] hostapd: Add support for wpa_unadvertised_key_mgmt
+
+AKMs listed in this setting are accepted in association requests from clients,
+but are not advertised in beacons / probe responses.
+
+---
+
+Copyright (c) 2023 Project CHIP Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+---
+ hostapd/config_file.c  | 14 +++++-----
+ hostapd/ctrl_iface.c   | 61 +++++++++++++++++++++++++++---------------
+ hostapd/hostapd.conf   |  4 +++
+ src/ap/ap_config.h     |  1 +
+ src/ap/wpa_auth.h      |  1 +
+ src/ap/wpa_auth_glue.c |  1 +
+ src/ap/wpa_auth_ie.c   |  2 +-
+ 7 files changed, 55 insertions(+), 29 deletions(-)
+
+diff --git a/hostapd/config_file.c b/hostapd/config_file.c
+index b14728d1b..05ad6eeb4 100644
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -772,12 +772,6 @@ static int hostapd_config_parse_key_mgmt(int line, const char *value)
+ 	}
+ 
+ 	os_free(buf);
+-	if (val == 0) {
+-		wpa_printf(MSG_ERROR, "Line %d: no key_mgmt values "
+-			   "configured.", line);
+-		return -1;
+-	}
+-
+ 	return val;
+ }
+ 
+@@ -2969,8 +2963,16 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 		}
+ 	} else if (os_strcmp(buf, "wpa_key_mgmt") == 0) {
+ 		bss->wpa_key_mgmt = hostapd_config_parse_key_mgmt(line, pos);
++		if (bss->wpa_key_mgmt == 0) {
++			wpa_printf(MSG_ERROR, "Line %d: no key_mgmt values configured.", line);
++			return 1;
++		}
+ 		if (bss->wpa_key_mgmt == -1)
+ 			return 1;
++	} else if (os_strcmp(buf, "wpa_unadvertised_key_mgmt") == 0) {
++		bss->wpa_unadvertised_key_mgmt = hostapd_config_parse_key_mgmt(line, pos);
++		if (bss->wpa_unadvertised_key_mgmt == -1)
++			return 1;
+ 	} else if (os_strcmp(buf, "wpa_psk_radius") == 0) {
+ 		bss->wpa_psk_radius = atoi(pos);
+ 		if (bss->wpa_psk_radius != PSK_RADIUS_IGNORED &&
+diff --git a/hostapd/ctrl_iface.c b/hostapd/ctrl_iface.c
+index 86adf18e5..ba9c46b23 100644
+--- a/hostapd/ctrl_iface.c
++++ b/hostapd/ctrl_iface.c
+@@ -1039,7 +1039,7 @@ static int hostapd_ctrl_iface_coloc_intf_req(struct hostapd_data *hapd,
+ #endif /* CONFIG_WNM_AP */
+ 
+ 
+-static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
++static int hostapd_ctrl_iface_get_key_mgmt(int key_mgmt,
+ 					   char *buf, size_t buflen)
+ {
+ 	int ret = 0;
+@@ -1048,35 +1048,33 @@ static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
+ 	pos = buf;
+ 	end = buf + buflen;
+ 
+-	WPA_ASSERT(hapd->conf->wpa_key_mgmt);
+-
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_PSK) {
++	if (key_mgmt & WPA_KEY_MGMT_PSK) {
+ 		ret = os_snprintf(pos, end - pos, "WPA-PSK ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_IEEE8021X) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X) {
+ 		ret = os_snprintf(pos, end - pos, "WPA-EAP ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+ #ifdef CONFIG_IEEE80211R_AP
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FT_PSK) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_PSK) {
+ 		ret = os_snprintf(pos, end - pos, "FT-PSK ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X) {
+ 		ret = os_snprintf(pos, end - pos, "FT-EAP ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+ #ifdef CONFIG_SHA384
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X_SHA384) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X_SHA384) {
+ 		ret = os_snprintf(pos, end - pos, "FT-EAP-SHA384 ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+@@ -1084,7 +1082,7 @@ static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
+ 	}
+ #endif /* CONFIG_SHA384 */
+ #ifdef CONFIG_SAE
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FT_SAE) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_SAE) {
+ 		ret = os_snprintf(pos, end - pos, "FT-SAE ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+@@ -1092,13 +1090,13 @@ static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
+ 	}
+ #endif /* CONFIG_SAE */
+ #ifdef CONFIG_FILS
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "FT-FILS-SHA256 ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA384) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA384) {
+ 		ret = os_snprintf(pos, end - pos, "FT-FILS-SHA384 ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+@@ -1106,33 +1104,33 @@ static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
+ 	}
+ #endif /* CONFIG_FILS */
+ #endif /* CONFIG_IEEE80211R_AP */
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_PSK_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_PSK_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "WPA-PSK-SHA256 ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "WPA-EAP-SHA256 ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+ #ifdef CONFIG_SAE
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_SAE) {
++	if (key_mgmt & WPA_KEY_MGMT_SAE) {
+ 		ret = os_snprintf(pos, end - pos, "SAE ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+ #endif /* CONFIG_SAE */
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_IEEE8021X_SUITE_B) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_SUITE_B) {
+ 		ret = os_snprintf(pos, end - pos, "WPA-EAP-SUITE-B ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+-	if (hapd->conf->wpa_key_mgmt &
++	if (key_mgmt &
+ 	    WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
+ 		ret = os_snprintf(pos, end - pos,
+ 				  "WPA-EAP-SUITE-B-192 ");
+@@ -1141,13 +1139,13 @@ static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
+ 		pos += ret;
+ 	}
+ #ifdef CONFIG_FILS
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FILS_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_FILS_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "FILS-SHA256 ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+ 		pos += ret;
+ 	}
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_FILS_SHA384) {
++	if (key_mgmt & WPA_KEY_MGMT_FILS_SHA384) {
+ 		ret = os_snprintf(pos, end - pos, "FILS-SHA384 ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+@@ -1156,7 +1154,7 @@ static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
+ #endif /* CONFIG_FILS */
+ 
+ #ifdef CONFIG_OWE
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_OWE) {
++	if (key_mgmt & WPA_KEY_MGMT_OWE) {
+ 		ret = os_snprintf(pos, end - pos, "OWE ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+@@ -1165,7 +1163,7 @@ static int hostapd_ctrl_iface_get_key_mgmt(struct hostapd_data *hapd,
+ #endif /* CONFIG_OWE */
+ 
+ #ifdef CONFIG_DPP
+-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_DPP) {
++	if (key_mgmt & WPA_KEY_MGMT_DPP) {
+ 		ret = os_snprintf(pos, end - pos, "DPP ");
+ 		if (os_snprintf_error(end - pos, ret))
+ 			return pos - buf;
+@@ -1290,7 +1288,21 @@ static int hostapd_ctrl_iface_get_config(struct hostapd_data *hapd,
+ 			return pos - buf;
+ 		pos += ret;
+ 
+-		pos += hostapd_ctrl_iface_get_key_mgmt(hapd, pos, end - pos);
++		pos += hostapd_ctrl_iface_get_key_mgmt(hapd->conf->wpa_key_mgmt, pos, end - pos);
++
++		ret = os_snprintf(pos, end - pos, "\n");
++		if (os_snprintf_error(end - pos, ret))
++			return pos - buf;
++		pos += ret;
++	}
++
++	if (hapd->conf->wpa && hapd->conf->wpa_unadvertised_key_mgmt) {
++		ret = os_snprintf(pos, end - pos, "unadvertised_key_mgmt=");
++		if (os_snprintf_error(end - pos, ret))
++			return pos - buf;
++		pos += ret;
++
++		pos += hostapd_ctrl_iface_get_key_mgmt(hapd->conf->wpa_unadvertised_key_mgmt, pos, end - pos);
+ 
+ 		ret = os_snprintf(pos, end - pos, "\n");
+ 		if (os_snprintf_error(end - pos, ret))
+@@ -4607,7 +4619,12 @@ static int hostapd_ctrl_iface_dup_param(struct hostapd_data *src_hapd,
+ 	} else if (os_strcmp(param, "wpa_key_mgmt") == 0 &&
+ 		   src_hapd->conf->wpa_key_mgmt) {
+ 		res = hostapd_ctrl_iface_get_key_mgmt(
+-			src_hapd, value, HOSTAPD_CLI_DUP_VALUE_MAX_LEN);
++			src_hapd->conf->wpa_key_mgmt, value, HOSTAPD_CLI_DUP_VALUE_MAX_LEN);
++		if (os_snprintf_error(HOSTAPD_CLI_DUP_VALUE_MAX_LEN, res))
++			goto error_stringify;
++	} else if (os_strcmp(param, "wpa_unadvertised_key_mgmt") == 0) {
++		res = hostapd_ctrl_iface_get_key_mgmt(
++			src_hapd->conf->wpa_unadvertised_key_mgmt, value, HOSTAPD_CLI_DUP_VALUE_MAX_LEN);
+ 		if (os_snprintf_error(HOSTAPD_CLI_DUP_VALUE_MAX_LEN, res))
+ 			goto error_stringify;
+ 	} else if (os_strcmp(param, "wpa_pairwise") == 0 &&
+diff --git a/hostapd/hostapd.conf b/hostapd/hostapd.conf
+index 3c2019f73..127ceb675 100644
+--- a/hostapd/hostapd.conf
++++ b/hostapd/hostapd.conf
+@@ -1682,6 +1682,10 @@ own_ip_addr=127.0.0.1
+ # (dot11RSNAConfigAuthenticationSuitesTable)
+ #wpa_key_mgmt=WPA-PSK WPA-EAP
+ 
++# An additional set of accepted key management algorithms that are not
++# advertised in the RSN IE in beacons or probe responses. (default: none)
++#wpa_unadvertised_key_mgmt=
++
+ # Set of accepted cipher suites (encryption algorithms) for pairwise keys
+ # (unicast packets). This is a space separated list of algorithms:
+ # CCMP = AES in Counter mode with CBC-MAC (CCMP-128)
+diff --git a/src/ap/ap_config.h b/src/ap/ap_config.h
+index 49cd3168a..d476dd6d2 100644
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -351,6 +351,7 @@ struct hostapd_bss_config {
+ 	int wpa; /* bitfield of WPA_PROTO_WPA, WPA_PROTO_RSN */
+ 	int extended_key_id;
+ 	int wpa_key_mgmt;
++	int wpa_unadvertised_key_mgmt;
+ 	enum mfp_options ieee80211w;
+ 	int group_mgmt_cipher;
+ 	int beacon_prot;
+diff --git a/src/ap/wpa_auth.h b/src/ap/wpa_auth.h
+index fe47723b9..cb44c5b10 100644
+--- a/src/ap/wpa_auth.h
++++ b/src/ap/wpa_auth.h
+@@ -172,6 +172,7 @@ struct wpa_auth_config {
+ 	int wpa;
+ 	int extended_key_id;
+ 	int wpa_key_mgmt;
++	int wpa_unadvertised_key_mgmt;
+ 	int wpa_pairwise;
+ 	int wpa_group;
+ 	int wpa_group_rekey;
+diff --git a/src/ap/wpa_auth_glue.c b/src/ap/wpa_auth_glue.c
+index 3e9921553..513a15508 100644
+--- a/src/ap/wpa_auth_glue.c
++++ b/src/ap/wpa_auth_glue.c
+@@ -44,6 +44,7 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
+ 	wconf->wpa = conf->wpa;
+ 	wconf->extended_key_id = conf->extended_key_id;
+ 	wconf->wpa_key_mgmt = conf->wpa_key_mgmt;
++	wconf->wpa_unadvertised_key_mgmt = conf->wpa_unadvertised_key_mgmt;
+ 	wconf->wpa_pairwise = conf->wpa_pairwise;
+ 	wconf->wpa_group = conf->wpa_group;
+ 	wconf->wpa_group_rekey = conf->wpa_group_rekey;
+diff --git a/src/ap/wpa_auth_ie.c b/src/ap/wpa_auth_ie.c
+index 524922e4e..a168307f6 100644
+--- a/src/ap/wpa_auth_ie.c
++++ b/src/ap/wpa_auth_ie.c
+@@ -737,7 +737,7 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
+ 		return WPA_INVALID_GROUP;
+ 	}
+ 
+-	key_mgmt = data.key_mgmt & wpa_auth->conf.wpa_key_mgmt;
++	key_mgmt = data.key_mgmt & (wpa_auth->conf.wpa_key_mgmt | wpa_auth->conf.wpa_unadvertised_key_mgmt);
+ 	if (!key_mgmt) {
+ 		wpa_printf(MSG_DEBUG, "Invalid WPA key mgmt (0x%x) from "
+ 			   MACSTR, data.key_mgmt, MAC2STR(sm->addr));
+-- 
+2.40.1
+

@@ -1,0 +1,152 @@
+name: hostap hwsim tests
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  hostap-hwsim-tests:
+    # This job builds hostap with the patches from this repository, and then runs a sub-set of the
+    # hostap hwsim test suite. Note that this is not exactly identical to building the hostapd
+    # package within OpenWrt, since the patches carried by OpenWrt itself are not included here.
+    #
+    # The tests rely on the mac80211_hwsim Linux kernel module to simulate a Wi-Fi network. Because
+    # this module is not available for the kernel used by the GitHub-hosted Ubuntu runner, the test
+    # is executed in a nested qemu vm running a generic Ubuntu kernel.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo apt-get install -y --no-install-recommends \
+          binutils-dev libiberty-dev libnl-genl-3-dev libnl-route-3-dev libpcap-dev libsqlite3-dev libssl-dev \
+          bridge-utils net-tools openssl psmisc python3
+        sudo pip3 install pycryptodome pyrad # deb versions don't work
+
+    - name: Prepare qemu
+      run: |
+        KERNEL="$(apt-cache depends linux-image-generic | grep -o 'linux-image-.*-generic')"
+        KERNEL="${KERNEL#linux-image-}"
+        KERNEL="${KERNEL%-generic}"
+        echo ">>> Selecting linux-image-generic $KERNEL for qemu"
+
+        ### Disable kernel post-install hooks
+        sudo mv /etc/kernel/postinst.d /etc/kernel/postinst.d.disabled
+        sudo install -m 0644 /dev/stdin /etc/kernel-img.conf <<'END'
+        do_symlinks=no
+        do_bootloader=no
+        END
+
+        ### Install qemu and generic kernel
+        sudo apt-get install -y --no-install-recommends \
+          initramfs-tools-core qemu-system-x86 \
+          "linux-image-$KERNEL-generic" "linux-modules-extra-$KERNEL-generic"
+        KERNEL_IMAGE="$(dpkg -L "linux-image-$KERNEL-generic" | grep /vmlinuz-)"
+        KERNEL_RELEASE="${KERNEL_IMAGE#*/vmlinuz-}" # can have a suffix e.g. "-amd64"
+        sudo chmod a+r "$KERNEL_IMAGE"
+
+        ### Prepare initramfs
+        echo ">>> Creating minimal initramfs for kernel $KERNEL_RELEASE"
+        INITRAMFS="$(mktemp -d)"
+        install -d "${INITRAMFS}/scripts"
+        install -m 0644 /dev/stdin "${INITRAMFS}/initramfs.conf" <<'END'
+        MODULES=list
+        BUSYBOX=n
+        KEYMAP=n
+        RESUME=none
+        FSTYPE=virtiofs
+        COMPRESS=gzip
+        END
+        install -m 0644 /dev/stdin "${INITRAMFS}/modules" <<'END'
+        virtiofs
+        virtio_pci
+        virtio_rng
+        END
+        sudo mkinitramfs -d "${INITRAMFS}" -o "${INITRAMFS}/initramfs.gz" "$KERNEL_RELEASE"
+
+        ### Create qemu-run script for use by later steps
+        install /dev/stdin qemu-run <<END # note: variable expansion applies
+        #!/bin/bash
+        JOB="\$(mktemp -d)"
+        chmod a+x "\$JOB" # ensure root can execute run script
+        # create run script: restore HOSTNAME and PWD, on exit transmit exit code and terminate vm
+        { printf '#!/bin/bash -e
+        export USER=root LOGNAME=root HOME=/root HOSTNAME=%q
+        echo "\$HOSTNAME">/proc/sys/kernel/hostname; cd %q; echo ===>&2
+        trap "echo \\\$?>%q/rc; echo ===>&2; echo o>/proc/sysrq-trigger; sleep 999" exit
+        ' "\$HOSTNAME" "\$PWD" "\$JOB"; cat; } | install /dev/stdin "\${JOB}/run"
+        # run qemu (memory: 80% of host, root fs: is entire host fs via virtiofsd)
+        MEM="\$(awk '/^MemTotal:/{print int(\$2/1024*0.8)}' </proc/meminfo)"
+        sudo /usr/lib/qemu/virtiofsd \\
+          --socket-path="\${JOB}/vfs.sock" --socket-group="\$(id -ng)" \\
+          -o source=/ -o sandbox=chroot &
+        while ! test -e "\${JOB}/vfs.sock"; do sleep .01; done
+        qemu-system-x86_64 \\
+          -m "\$MEM" -nographic -monitor none \\
+          -object memory-backend-memfd,id=mem,size="\${MEM}M",share=on -numa node,memdev=mem \\
+          -chardev socket,id=char0,path="\${JOB}/vfs.sock" \\
+          -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=rootvfs \\
+          -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 \\
+          -kernel '$KERNEL_IMAGE' -initrd '${INITRAMFS}/initramfs.gz' \\
+          -append "console=ttyS0 rootfstype=virtiofs root=rootvfs rw init=\${JOB}/run"
+        wait
+        # propagate exit code and clean up
+        read -r <"\${JOB}/rc" 2>/dev/null || echo "Failed to read job exit code"
+        rm -rf -- "\$JOB"
+        exit "\${REPLY:-127}"
+        END
+
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        path: matter
+
+    - name: Determine hostap base revision
+      run: echo "hostap_ref=$(cat matter/overlay/hostapd/patches.base)" >>"$GITHUB_ENV"
+
+    - name: Checkout hostap
+      uses: actions/checkout@v3
+      with:
+        path: hostap
+        github-server-url: https://w1.fi/
+        repository: ./hostap.git
+        ref: ${{ env.hostap_ref }}
+        fetch-depth: 0 # server does not support fetching unadvertised commits
+        token: anonymous # don't send our github token
+
+    - name: Patch
+      run: |
+        for patch in "matter/overlay/hostapd/patches"/*.patch; do
+          echo "Applying $(basename "$patch")"
+          patch -d hostap -p1 <"$patch"
+        done
+    
+    - name: Build
+      run: |
+        for module in hostapd wpa_supplicant; do
+          cp "hostap/tests/hwsim/example-$module.config" "hostap/$module/.config"
+          CFLAGS=-Wno-deprecated-declarations make -j "$(nproc)" -C "hostap/$module"
+        done
+        make -j "$(nproc)" -C hostap/wlantest
+
+    - name: Test
+      id: test
+      timeout-minutes: 15
+      run: |
+        ./qemu-run <<'END'
+        cd hostap/tests/hwsim
+        ./run-all.sh 'matter_*'
+        END
+
+    - name: Fix log permissions
+      if: always()
+      run: |
+        sudo chmod -R a+r hostap/tests/hwsim/logs || true
+        sudo rm -f hostap/tests/hwsim/logs/current # zip follows symlinks
+
+    - name: Upload test logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-logs
+        path: hostap/tests/hwsim/logs

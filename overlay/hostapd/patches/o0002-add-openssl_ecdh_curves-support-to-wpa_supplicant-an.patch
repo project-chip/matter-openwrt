@@ -1,0 +1,167 @@
+From 606216e5e65931fb3d36c90139d44edebbd329b2 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 22 Mar 2023 10:58:42 +1300
+Subject: [PATCH] Add openssl_ecdh_curves support to wpa_supplicant and WolfSSL
+
+Add a openssl_ecdh_curves configuration option to wpa_supplicant (hostapd
+already has this option). Also add support for it in the WolfSSL backend.
+
+---
+
+Copyright (c) 2023 Project CHIP Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+---
+ src/crypto/tls_wolfssl.c      | 11 +++++++++++
+ src/eap_peer/eap_config.h     |  8 ++++++++
+ src/eap_peer/eap_tls_common.c |  1 +
+ wpa_supplicant/config.c       |  2 ++
+ wpa_supplicant/config.h       |  9 +++++++++
+ wpa_supplicant/config_file.c  |  3 +++
+ wpa_supplicant/wpa_cli.c      |  3 ++-
+ 7 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/src/crypto/tls_wolfssl.c b/src/crypto/tls_wolfssl.c
+index cf482bfc3..7bb0f97d6 100644
+--- a/src/crypto/tls_wolfssl.c
++++ b/src/crypto/tls_wolfssl.c
+@@ -1549,9 +1549,20 @@ int tls_global_set_params(void *tls_ctx,
+ 	}
+ 
+ 	if (params->openssl_ecdh_curves) {
++#if LIBWOLFSSL_VERSION_HEX >= 0x04004000
++		if (wolfSSL_CTX_set1_groups_list(tls_ctx,
++						 /* should take a const char* ... */
++						 (char *)params->openssl_ecdh_curves) != 1) {
++			wpa_printf(MSG_INFO,
++				   "wolfSSL: Failed to set ecdh curves (groups) '%s'",
++				   params->openssl_ecdh_curves);
++			return -1;
++		}
++#else
+ 		wpa_printf(MSG_INFO,
+ 			   "wolfSSL: openssl_ecdh_curves not supported");
+ 		return -1;
++#endif /* LIBWOLFSSL_VERSION_HEX >= 0x04004000 */
+ 	}
+ 
+ #ifdef HAVE_SESSION_TICKET
+diff --git a/src/eap_peer/eap_config.h b/src/eap_peer/eap_config.h
+index 3238f74f9..827790f3a 100644
+--- a/src/eap_peer/eap_config.h
++++ b/src/eap_peer/eap_config.h
+@@ -684,6 +684,14 @@ struct eap_peer_config {
+ 	 */
+ 	char *openssl_ciphers;
+ 
++	/**
++	 * openssl_ecdh_curves - OpenSSL ECDH curves / groups string
++	 *
++	 * Configures the ECDH curves / groups for this connection.
++	 * Not all TLS backends support this option.
++	 */
++	char *openssl_ecdh_curves;
++
+ 	/**
+ 	 * erp - Whether EAP Re-authentication Protocol (ERP) is enabled
+ 	 */
+diff --git a/src/eap_peer/eap_tls_common.c b/src/eap_peer/eap_tls_common.c
+index c1837db06..4ed7b0ef1 100644
+--- a/src/eap_peer/eap_tls_common.c
++++ b/src/eap_peer/eap_tls_common.c
+@@ -236,6 +236,7 @@ static int eap_tls_params_from_conf(struct eap_sm *sm,
+ 	}
+ 
+ 	params->openssl_ciphers = config->openssl_ciphers;
++	params->openssl_ecdh_curves = config->openssl_ecdh_curves;
+ 
+ 	sm->ext_cert_check = !!(params->flags & TLS_CONN_EXT_CERT_CHECK);
+ 
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index bf062b079..b33624636 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -2507,6 +2507,7 @@ static const struct parse_data ssid_fields[] = {
+ 	{ INT(eapol_flags) },
+ 	{ INTe(sim_num, sim_num) },
+ 	{ STRe(openssl_ciphers, openssl_ciphers) },
++	{ STRe(openssl_ecdh_curves, openssl_ecdh_curves) },
+ 	{ INTe(erp, erp) },
+ #endif /* IEEE8021X_EAPOL */
+ #ifdef CONFIG_WEP
+@@ -2789,6 +2790,7 @@ static void eap_peer_config_free(struct eap_peer_config *eap)
+ 	bin_clear_free(eap->new_password, eap->new_password_len);
+ 	str_clear_free(eap->external_sim_resp);
+ 	os_free(eap->openssl_ciphers);
++	os_free(eap->openssl_ecdh_curves);
+ }
+ 
+ #endif /* IEEE8021X_EAPOL */
+diff --git a/wpa_supplicant/config.h b/wpa_supplicant/config.h
+index d22ef05fb..ed0bf27a0 100644
+--- a/wpa_supplicant/config.h
++++ b/wpa_supplicant/config.h
+@@ -615,6 +615,15 @@ struct wpa_config {
+ 	 */
+ 	char *openssl_ciphers;
+ 
++	/**
++	 * openssl_ecdh_curves - OpenSSL ECDH curves / groups string
++	 *
++	 * Configures the ECDH curves for the EAP-TLS/TTLS/PEAP/FAST client.
++	 * This is a colon separated list of the supported curves (e.g.
++	 * "P-521:P-384:P-256"). Not all TLS backends support this option.
++	 */
++	char *openssl_ecdh_curves;
++
+ 	/**
+ 	 * pcsc_reader - PC/SC reader name prefix
+ 	 *
+diff --git a/wpa_supplicant/config_file.c b/wpa_supplicant/config_file.c
+index 6db5010db..6e6e8a9e1 100644
+--- a/wpa_supplicant/config_file.c
++++ b/wpa_supplicant/config_file.c
+@@ -746,6 +746,7 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
+ 	INTe(machine_engine, machine_cert.engine);
+ 	INT_DEF(eapol_flags, DEFAULT_EAPOL_FLAGS);
+ 	STR(openssl_ciphers);
++	STR(openssl_ecdh_curves);
+ 	INTe(erp, erp);
+ #endif /* IEEE8021X_EAPOL */
+ #ifdef CONFIG_WEP
+@@ -1103,6 +1104,8 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
+ 			config->pkcs11_module_path);
+ 	if (config->openssl_ciphers)
+ 		fprintf(f, "openssl_ciphers=%s\n", config->openssl_ciphers);
++	if (config->openssl_ecdh_curves)
++		fprintf(f, "openssl_ecdh_curves=%s\n", config->openssl_ecdh_curves);
+ 	if (config->pcsc_reader)
+ 		fprintf(f, "pcsc_reader=%s\n", config->pcsc_reader);
+ 	if (config->pcsc_pin)
+diff --git a/wpa_supplicant/wpa_cli.c b/wpa_supplicant/wpa_cli.c
+index 033589f76..2d4b174c4 100644
+--- a/wpa_supplicant/wpa_cli.c
++++ b/wpa_supplicant/wpa_cli.c
+@@ -453,7 +453,8 @@ static char ** wpa_cli_complete_set(const char *str, int pos)
+ 		"dot11RSNASAERetransPeriod",
+ #endif /* CONFIG_MESH */
+ 		"disable_scan_offload", "fast_reauth", "opensc_engine_path",
+-		"pkcs11_engine_path", "pkcs11_module_path", "openssl_ciphers",
++		"pkcs11_engine_path", "pkcs11_module_path",
++		"openssl_ciphers", "openssl_ecdh_curves",
+ 		"pcsc_reader", "pcsc_pin", "external_sim", "driver_param",
+ 		"dot11RSNAConfigPMKLifetime",
+ 		"dot11RSNAConfigPMKReauthThreshold",
+-- 
+2.40.1
+
