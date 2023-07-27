@@ -28,7 +28,7 @@ PKG_SOURCE_SUBMODULES:=\
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
 PKG_SOURCE_DATE:=2023-06-21
 PKG_SOURCE_VERSION:=a816538e932cfa1d13891d7f103b6c2dd23a28ff
-PKG_MIRROR_HASH:=66b3da3e80b6aa8f9a5349ccb165c5ac48f707f22e0360d40c9f08a71619e9d3
+PKG_MIRROR_HASH:=f5738a724b26bfc471f98007a05098d50f76ef7391ef9127a974ea7a283a9db8
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
@@ -54,11 +54,17 @@ define Package/matter-netman/description
   Integrates a router / access point with the Matter IoT ecosystem.
 endef
 
+# https://github.com/project-chip/matter-openwrt/issues/2
+ifeq ($(DUMP)$(filter SUBMODULES:=,$(Download/Defaults)),)
+$(error PKG_SOURCE_SUBMODULES is not supported, ensure https://github.com/openwrt/openwrt/pull/13000 is included in your OpenWRT buildroot)
+endif
+
+# https://github.com/openwrt/openwrt/issues/13016
+TARGET_CXXFLAGS += -Wno-format-nonliteral
+
 # The build environment contains host tools that can be shared between targets
 CHIP_BUILD_ENV_DIR:=$(STAGING_DIR_HOST)/share/chip-build-env
 OUT_DIR:=$(PKG_BUILD_DIR)/out/openwrt
-
-TARGET_CXXFLAGS += -Wno-format-nonliteral # https://github.com/openwrt/openwrt/issues/13016
 
 # lighting-app is a placeholder for now: https://github.com/project-chip/connectedhomeip/issues/28312
 define Build/Configure
