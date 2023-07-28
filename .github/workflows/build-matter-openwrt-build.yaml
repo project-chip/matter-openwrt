@@ -1,0 +1,27 @@
+name: build matter-openwrt-build container
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .containers/matter-openwrt-build/**
+      - .github/workflows/build-matter-openwrt-build.yaml
+  push:
+    paths:
+      - .containers/matter-openwrt-build/**
+      - .github/workflows/build-matter-openwrt-build.yaml
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and push
+        uses: docker/build-push-action@v4
+        with:
+          context: "{{defaultContext}}:.containers/matter-openwrt-build"
+          push: "${{ github.repository_owner == 'project-chip' && github.event_name == 'push' && github.event.ref == 'refs/heads/main' }}"
+          tags: |
+            "ghcr.io/project-chip/matter-openwrt-build:latest"
