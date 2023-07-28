@@ -1,18 +1,18 @@
-# Matter OpenWRT Feed
+# Matter OpenWrt Feed
 
-This repository is an [OpenWRT](https://openwrt.org) feed that packages [Matter](https://github.com/project-chip/connectedhomeip) software components for the OpenWRT operating system. It forms part of a reference implementation for Matter device types in the Routers & Access Points category.
+This repository is an [OpenWrt](https://openwrt.org) feed that packages [Matter](https://github.com/project-chip/connectedhomeip) software components for the OpenWrt operating system. It forms part of a reference implementation for Matter device types in the Routers & Access Points category.
 
 Matter is a unified, open-source application-layer connectivity standard built to enable developers and device manufacturers to connect and build reliable, and secure ecosystems and increase compatibility among connected home devices. Visit [buildwithmatter.com](http://buildwithmatter.com) to learn more.
 
 ## Usage
 
-This repository is intended to be included as a package feed in an OpenWRT buildroot, and familiarity with the configuration and use of the OpenWRT build system is assumed in the following instructions. Please refer to the [OpenWRT Developer Guide](https://openwrt.org/docs/guide-developer/start) for general guidance on building an OpenWRT system.
+This repository is intended to be included as a package feed in an OpenWrt buildroot, and familiarity with the configuration and use of the OpenWrt build system is assumed in the following instructions. Please refer to the [OpenWrt Developer Guide](https://openwrt.org/docs/guide-developer/start) for general guidance on building an OpenWrt system.
 
-Note that this repository is aimed primarily at Matter implementers and OpenWRT integrators, and provides source packages only.
+Note that this repository is aimed primarily at Matter implementers and OpenWrt integrators, and provides source packages only.
 
 ### Adding the feed
 
-Add the following line to `feeds.conf` (ensure the OpenWRT `packages` feed is also present; it's definition can be copied from `feeds.conf.default` if necessary):
+Add the following line to `feeds.conf` (ensure the OpenWrt `packages` feed is also present; it's definition can be copied from `feeds.conf.default` if necessary):
 
 ```
 src-git matter https://github.com/project-chip/matter-openwrt.git
@@ -39,4 +39,4 @@ Note that since the Matter SDK is configured to build using OpenSSL, it is recom
 
 ## License
 
-Matter-OpenWRT is released under the [Apache 2.0 license](./LICENSE).
+Matter-OpenWrt is released under the [Apache 2.0 license](./LICENSE).
