@@ -17,7 +17,7 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=gn
 PKG_SOURCE_URL:=https://gn.googlesource.com/gn
 PKG_SOURCE_PROTO:=git
-PKG_SOURCE_MIRROR:=0 # don't try OpenWRT mirror
+PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 
 # GN versioning is based on the number of commits since the tag `initial-commit`,
 # and is exposed to build scripts via the `gn_version` variable. When updating

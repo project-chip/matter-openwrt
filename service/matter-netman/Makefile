@@ -18,7 +18,7 @@ PKG_NAME:=matter-netman
 PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/project-chip/connectedhomeip.git
 PKG_SOURCE_PROTO:=git
-PKG_SOURCE_MIRROR:=0 # don't try OpenWRT mirror
+PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 PKG_SOURCE_SUBMODULES:=\
   third_party/pigweed/repo \
   third_party/jsoncpp/repo \
@@ -56,7 +56,7 @@ endef
 
 # https://github.com/project-chip/matter-openwrt/issues/2
 ifeq ($(DUMP)$(filter SUBMODULES:=,$(Download/Defaults)),)
-$(error PKG_SOURCE_SUBMODULES is not supported, ensure https://github.com/openwrt/openwrt/pull/13000 is included in your OpenWRT buildroot)
+$(error PKG_SOURCE_SUBMODULES is not supported, ensure https://github.com/openwrt/openwrt/pull/13000 is included in your OpenWrt buildroot)
 endif
 
 # https://github.com/openwrt/openwrt/issues/13016
