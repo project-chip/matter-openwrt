@@ -11,6 +11,9 @@ on:
       - .containers/matter-openwrt-build/**
       - .github/workflows/build-matter-openwrt-build.yaml
 
+permissions:
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
