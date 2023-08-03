@@ -18,13 +18,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: elgohr/Publish-Docker-Github-Action@v5
         with:
-          context: "{{defaultContext}}:.containers/matter-openwrt-build"
-          push: "${{ github.repository_owner == 'project-chip' && github.event_name == 'push' && github.event.ref == 'refs/heads/main' }}"
-          tags: |
-            "ghcr.io/project-chip/matter-openwrt-build:latest"
+          name: project-chip/matter-openwrt/matter-openwrt-build
+          context: .containers/matter-openwrt-build
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          no_push: ${{ github.repository_owner != 'project-chip' || github.event_name != 'push' || github.event.ref != 'refs/heads/main' }}
