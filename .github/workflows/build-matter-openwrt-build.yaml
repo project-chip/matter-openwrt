@@ -27,7 +27,7 @@ jobs:
       - name: Build and push
         uses: elgohr/Publish-Docker-Github-Action@v5
         with:
-          name: project-chip/matter-openwrt/matter-openwrt-build
+          name: project-chip/matter-openwrt-build
           context: .containers/matter-openwrt-build
           registry: ghcr.io
           username: ${{ github.actor }}
