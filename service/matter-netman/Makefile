@@ -26,9 +26,9 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2023-06-21
-PKG_SOURCE_VERSION:=a816538e932cfa1d13891d7f103b6c2dd23a28ff
-PKG_MIRROR_HASH:=f5738a724b26bfc471f98007a05098d50f76ef7391ef9127a974ea7a283a9db8
+PKG_SOURCE_DATE:=2023-08-08
+PKG_SOURCE_VERSION:=367a0c672c18e0137e0162c15b78adbcb039a33a
+PKG_MIRROR_HASH:=5be101a07ffefe7e5bc25f2b3b497d2639e6b8bffb8ec41e173e0904ea814fa8
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
@@ -72,7 +72,11 @@ define Build/Configure
 		$(CONFIGURE_VARS) $(PKG_BUILD_DIR)/scripts/configure \
 			--build-env-dir="$(CHIP_BUILD_ENV_DIR)" \
 			--project=examples/lighting-app/linux \
-			--target=$(GNU_TARGET_NAME)
+			--target=$(GNU_TARGET_NAME) \
+			--enable-wifi=no \
+			--enable-openthread=no \
+			--enable-network-layer-ble=no \
+			--enable-tracing-support=no
 endef
 
 define Build/Compile
