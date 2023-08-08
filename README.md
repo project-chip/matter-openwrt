@@ -1,5 +1,7 @@
 # Matter OpenWrt Feed
 
+[![build matter packages](https://github.com/project-chip/matter-openwrt/actions/workflows/build-packages.yaml/badge.svg)](https://github.com/project-chip/matter-openwrt/actions/workflows/build-packages.yaml)
+
 This repository is an [OpenWrt](https://openwrt.org) feed that packages [Matter](https://github.com/project-chip/connectedhomeip) software components for the OpenWrt operating system. It forms part of a reference implementation for Matter device types in the Routers & Access Points category.
 
 Matter is a unified, open-source application-layer connectivity standard built to enable developers and device manufacturers to connect and build reliable, and secure ecosystems and increase compatibility among connected home devices. Visit [buildwithmatter.com](http://buildwithmatter.com) to learn more.

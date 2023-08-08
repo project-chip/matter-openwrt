@@ -1,0 +1,30 @@
+name: build matter packages
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Run only the build step in the container rather than the whole job, because the UID of the
+      # buildbot user (1000) that owns the OpenWrt SDK files in /builder doesn't match the UID of
+      # the GitHub runner user (1001), causing file system permission issues.
+      - name: Build
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ghcr.io/project-chip/matter-openwrt-build:latest
+          options: --volume ${{ github.workspace }}:/workspace
+          run: |
+            set -x
+            wget -qO - https://github.com/openwrt/openwrt/pull/13000.patch | patch -p1
+            echo "src-link matter /workspace" >>feeds.conf
+            ./scripts/feeds update matter
+            ./scripts/feeds install -a -p matter -f
+            echo "CONFIG_PACKAGE_matter-netman=y" >.config
+            make defconfig
+            make -j package/matter-netman/compile V=s
