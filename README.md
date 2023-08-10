@@ -20,7 +20,7 @@ Add the following line to `feeds.conf` (ensure the OpenWrt `packages` feed is al
 src-git --force matter https://github.com/project-chip/matter-openwrt.git
 ```
 
-Run the following commands to fetch the feed and installs it into the build:
+Run the following commands to fetch the feed and install it into the build:
 
 ```
 $ ./scripts/feeds update packages matter
