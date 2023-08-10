@@ -19,12 +19,25 @@ jobs:
         with:
           image: ghcr.io/project-chip/matter-openwrt-build:latest
           options: --volume ${{ github.workspace }}:/workspace
+          shell: bash
           run: |
             set -x
             wget -qO - https://github.com/openwrt/openwrt/pull/13000.patch | patch -p1
-            echo "src-link matter /workspace" >>feeds.conf
+            echo "src-link --force matter /workspace" >>feeds.conf
             ./scripts/feeds update matter
-            ./scripts/feeds install -a -p matter -f
-            echo "CONFIG_PACKAGE_matter-netman=y" >.config
+            ./scripts/feeds install -a -p matter
+            cat feeds/matter/.config.ci >.config
             make defconfig
-            make -j package/matter-netman/compile V=s
+            failed=()
+            for pkg in $(awk -F '[[:space:]]|/' '/^Source-Makefile:/{print$(NF-1)}' feeds/matter.index); do
+              echo "::group::Building $pkg"
+              if ! make -j "$(nproc)" "package/$pkg/compile"; then
+                failed+=("$pkg")
+                make "package/$pkg/compile" V=s || true # re-run with verbose output
+              fi
+              echo "::endgroup::"
+            done
+            if [[ "${#failed[@]}" -gt 0 ]]; then
+              echo "ERROR: Some packages failed to build: ${failed[*]}"
+              exit 2
+            fi
