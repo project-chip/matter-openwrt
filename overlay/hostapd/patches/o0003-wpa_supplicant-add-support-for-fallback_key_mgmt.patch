@@ -1,0 +1,479 @@
+From 11bf4c1be79b57ac9e14a0c03546764e9be531d9 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 9 Mar 2023 21:38:30 +1300
+Subject: [PATCH] wpa_supplicant: Add support for fallback_key_mgmt
+
+When set and a given BSS is not advertising any of the AKMs configured in
+key_mgmt, fall back to the AKM from this setting and attempt to associated
+anyway.
+
+---
+
+Copyright (c) 2023 Project CHIP Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+---
+ wpa_supplicant/config.c            | 109 +++++++++++++++++++++--------
+ wpa_supplicant/config_file.c       |   8 +++
+ wpa_supplicant/config_ssid.h       |   9 +++
+ wpa_supplicant/events.c            |   2 +-
+ wpa_supplicant/wpa_cli.c           |   2 +-
+ wpa_supplicant/wpa_supplicant.c    |   9 ++-
+ wpa_supplicant/wpa_supplicant.conf |   4 ++
+ 7 files changed, 108 insertions(+), 35 deletions(-)
+
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index b33624636..1ea51f81b 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -750,10 +750,9 @@ static char * wpa_config_write_proto(const struct parse_data *data,
+ }
+ #endif /* NO_CONFIG_WRITE */
+ 
+-
+-static int wpa_config_parse_key_mgmt(const struct parse_data *data,
+-				     struct wpa_ssid *ssid, int line,
+-				     const char *value)
++static int wpa_config_parse_key_mgmt_value(const struct parse_data *data,
++					   int *key_mgmt, int single, int line,
++					   const char *value)
+ {
+ 	int val = 0, last, errors = 0;
+ 	char *start, *end, *buf;
+@@ -773,6 +772,11 @@ static int wpa_config_parse_key_mgmt(const struct parse_data *data,
+ 			end++;
+ 		last = *end == '\0';
+ 		*end = '\0';
++		if (single && val) {
++			wpa_printf(MSG_ERROR, "Line %d: more than one %s",
++				   line, data->name);
++			errors++;
++		}
+ 		if (os_strcmp(start, "WPA-PSK") == 0)
+ 			val |= WPA_KEY_MGMT_PSK;
+ 		else if (os_strcmp(start, "WPA-EAP") == 0)
+@@ -840,8 +844,8 @@ static int wpa_config_parse_key_mgmt(const struct parse_data *data,
+ 			val |= WPA_KEY_MGMT_DPP;
+ #endif /* CONFIG_DPP */
+ 		else {
+-			wpa_printf(MSG_ERROR, "Line %d: invalid key_mgmt '%s'",
+-				   line, start);
++			wpa_printf(MSG_ERROR, "Line %d: invalid %s '%s'",
++				   line, data->name, start);
+ 			errors++;
+ 		}
+ 
+@@ -851,6 +855,18 @@ static int wpa_config_parse_key_mgmt(const struct parse_data *data,
+ 	}
+ 	os_free(buf);
+ 
++	*key_mgmt = val;
++	return errors;
++}
++
++static int wpa_config_parse_key_mgmt(const struct parse_data *data,
++				     struct wpa_ssid *ssid, int line,
++				     const char *value)
++{
++	int val;
++	int errors = wpa_config_parse_key_mgmt_value(data, &val, 0,
++						     line, value);
++
+ 	if (val == 0) {
+ 		wpa_printf(MSG_ERROR,
+ 			   "Line %d: no key_mgmt values configured.", line);
+@@ -861,13 +877,33 @@ static int wpa_config_parse_key_mgmt(const struct parse_data *data,
+ 		return 1;
+ 	wpa_printf(MSG_MSGDUMP, "key_mgmt: 0x%x", val);
+ 	ssid->key_mgmt = val;
++	ssid->fallback_key_mgmt &= val;
+ 	return errors ? -1 : 0;
+ }
+ 
++static int wpa_config_parse_fallback_key_mgmt(const struct parse_data *data,
++					      struct wpa_ssid *ssid, int line,
++					      const char *value)
++{
++	int val;
++	int errors = wpa_config_parse_key_mgmt_value(data, &val, 1,
++						     line, value);
++
++	if (val & ~ssid->key_mgmt) {
++		wpa_printf(MSG_ERROR,
++			   "Line %d: fallback_key_mgmt value must be listed in key_mgmt", line);
++		errors++;
++	}
++
++	if (!errors && ssid->fallback_key_mgmt == val)
++		return 1;
++	wpa_printf(MSG_MSGDUMP, "fallback_key_mgmt: 0x%x", val);
++	ssid->fallback_key_mgmt = val;
++	return errors ? -1 : 0;
++}
+ 
+ #ifndef NO_CONFIG_WRITE
+-static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+-					struct wpa_ssid *ssid)
++static char * wpa_config_write_key_mgmt_value(int key_mgmt)
+ {
+ 	char *buf, *pos, *end;
+ 	int ret;
+@@ -877,7 +913,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		return NULL;
+ 	end = buf + 100;
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_PSK) {
++	if (key_mgmt & WPA_KEY_MGMT_PSK) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPA-PSK",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -887,7 +923,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_IEEE8021X) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPA-EAP",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -897,7 +933,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_IEEE8021X_NO_WPA) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_NO_WPA) {
+ 		ret = os_snprintf(pos, end - pos, "%sIEEE8021X",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -907,7 +943,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_NONE) {
++	if (key_mgmt & WPA_KEY_MGMT_NONE) {
+ 		ret = os_snprintf(pos, end - pos, "%sNONE",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -917,7 +953,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_WPA_NONE) {
++	if (key_mgmt & WPA_KEY_MGMT_WPA_NONE) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPA-NONE",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -928,7 +964,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 	}
+ 
+ #ifdef CONFIG_IEEE80211R
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FT_PSK) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_PSK) {
+ 		ret = os_snprintf(pos, end - pos, "%sFT-PSK",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -938,7 +974,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X) {
+ 		ret = os_snprintf(pos, end - pos, "%sFT-EAP",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -949,7 +985,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 	}
+ 
+ #ifdef CONFIG_SHA384
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X_SHA384) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_IEEE8021X_SHA384) {
+ 		ret = os_snprintf(pos, end - pos, "%sFT-EAP-SHA384",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -961,7 +997,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_SHA384 */
+ #endif /* CONFIG_IEEE80211R */
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_PSK_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_PSK_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPA-PSK-SHA256",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -971,7 +1007,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPA-EAP-SHA256",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -982,7 +1018,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 	}
+ 
+ #ifdef CONFIG_WPS
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_WPS) {
++	if (key_mgmt & WPA_KEY_MGMT_WPS) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPS",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -994,7 +1030,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_WPS */
+ 
+ #ifdef CONFIG_SAE
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_SAE) {
++	if (key_mgmt & WPA_KEY_MGMT_SAE) {
+ 		ret = os_snprintf(pos, end - pos, "%sSAE",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1004,7 +1040,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ 
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FT_SAE) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_SAE) {
+ 		ret = os_snprintf(pos, end - pos, "%sFT-SAE",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1016,7 +1052,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_SAE */
+ 
+ #ifdef CONFIG_HS20
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_OSEN) {
++	if (key_mgmt & WPA_KEY_MGMT_OSEN) {
+ 		ret = os_snprintf(pos, end - pos, "%sOSEN",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1028,7 +1064,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_HS20 */
+ 
+ #ifdef CONFIG_SUITEB
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_IEEE8021X_SUITE_B) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_SUITE_B) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPA-EAP-SUITE-B",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1040,7 +1076,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_SUITEB */
+ 
+ #ifdef CONFIG_SUITEB192
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
++	if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
+ 		ret = os_snprintf(pos, end - pos, "%sWPA-EAP-SUITE-B-192",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1052,7 +1088,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_SUITEB192 */
+ 
+ #ifdef CONFIG_FILS
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FILS_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_FILS_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "%sFILS-SHA256",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1061,7 +1097,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		}
+ 		pos += ret;
+ 	}
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FILS_SHA384) {
++	if (key_mgmt & WPA_KEY_MGMT_FILS_SHA384) {
+ 		ret = os_snprintf(pos, end - pos, "%sFILS-SHA384",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1071,7 +1107,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		pos += ret;
+ 	}
+ #ifdef CONFIG_IEEE80211R
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA256) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA256) {
+ 		ret = os_snprintf(pos, end - pos, "%sFT-FILS-SHA256",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1080,7 +1116,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 		}
+ 		pos += ret;
+ 	}
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA384) {
++	if (key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA384) {
+ 		ret = os_snprintf(pos, end - pos, "%sFT-FILS-SHA384",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1093,7 +1129,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_FILS */
+ 
+ #ifdef CONFIG_DPP
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_DPP) {
++	if (key_mgmt & WPA_KEY_MGMT_DPP) {
+ 		ret = os_snprintf(pos, end - pos, "%sDPP",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1105,7 +1141,7 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ #endif /* CONFIG_DPP */
+ 
+ #ifdef CONFIG_OWE
+-	if (ssid->key_mgmt & WPA_KEY_MGMT_OWE) {
++	if (key_mgmt & WPA_KEY_MGMT_OWE) {
+ 		ret = os_snprintf(pos, end - pos, "%sOWE",
+ 				  pos == buf ? "" : " ");
+ 		if (os_snprintf_error(end - pos, ret)) {
+@@ -1123,6 +1159,18 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
+ 
+ 	return buf;
+ }
++
++static char * wpa_config_write_key_mgmt(const struct parse_data *data,
++					struct wpa_ssid *ssid)
++{
++	return wpa_config_write_key_mgmt_value(ssid->key_mgmt);
++}
++
++static char * wpa_config_write_fallback_key_mgmt(const struct parse_data *data,
++						 struct wpa_ssid *ssid)
++{
++	return wpa_config_write_key_mgmt_value(ssid->fallback_key_mgmt);
++}
+ #endif /* NO_CONFIG_WRITE */
+ 
+ 
+@@ -2424,6 +2472,7 @@ static const struct parse_data ssid_fields[] = {
+ 	{ STR(sae_password_id) },
+ 	{ FUNC(proto) },
+ 	{ FUNC(key_mgmt) },
++	{ FUNC(fallback_key_mgmt) }, /* must be after key_mgmt */
+ 	{ INT(bg_scan_period) },
+ 	{ FUNC(pairwise) },
+ 	{ FUNC(group) },
+diff --git a/wpa_supplicant/config_file.c b/wpa_supplicant/config_file.c
+index 6e6e8a9e1..bf7dfc635 100644
+--- a/wpa_supplicant/config_file.c
++++ b/wpa_supplicant/config_file.c
+@@ -489,6 +489,13 @@ static void write_key_mgmt(FILE *f, struct wpa_ssid *ssid)
+ }
+ 
+ 
++static void write_fallback_key_mgmt(FILE *f, struct wpa_ssid *ssid)
++{
++	if (ssid->fallback_key_mgmt)
++		write_str(f, "fallback_key_mgmt", ssid);
++}
++
++
+ static void write_pairwise(FILE *f, struct wpa_ssid *ssid)
+ {
+ 	char *value;
+@@ -678,6 +685,7 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
+ 	write_int(f, "sae_pwe", ssid->sae_pwe, DEFAULT_SAE_PWE);
+ 	write_proto(f, ssid);
+ 	write_key_mgmt(f, ssid);
++	write_fallback_key_mgmt(f, ssid);
+ 	INT_DEF(bg_scan_period, DEFAULT_BG_SCAN_PERIOD);
+ 	write_pairwise(f, ssid);
+ 	write_group(f, ssid);
+diff --git a/wpa_supplicant/config_ssid.h b/wpa_supplicant/config_ssid.h
+index 724534dd0..b58e24429 100644
+--- a/wpa_supplicant/config_ssid.h
++++ b/wpa_supplicant/config_ssid.h
+@@ -271,6 +271,15 @@ struct wpa_ssid {
+ 	 */
+ 	int key_mgmt;
+ 
++	/**
++	 * fallback_key_mgmt - Fallback key management protocol
++	 *
++	 * A single WPA_KEY_MGMT_* value that is used if none of the key
++	 * management protocols advertised by the AP match our key_mgmt
++	 * configuration. If 0, no fallback is performed.
++	 */
++	int fallback_key_mgmt;
++
+ 	/**
+ 	 * bg_scan_period - Background scan period in seconds, 0 to disable, or
+ 	 * -1 to indicate no change to default driver configuration
+diff --git a/wpa_supplicant/events.c b/wpa_supplicant/events.c
+index f55e1846e..50ea72110 100644
+--- a/wpa_supplicant/events.c
++++ b/wpa_supplicant/events.c
+@@ -635,7 +635,7 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
+ 			break;
+ 		}
+ 
+-		if (!(ie.key_mgmt & ssid->key_mgmt)) {
++		if (!(ie.key_mgmt & ssid->key_mgmt) && !ssid->fallback_key_mgmt) {
+ 			if (debug_print)
+ 				wpa_dbg(wpa_s, MSG_DEBUG,
+ 					"   skip RSN IE - key mgmt mismatch");
+diff --git a/wpa_supplicant/wpa_cli.c b/wpa_supplicant/wpa_cli.c
+index 2d4b174c4..82f536efe 100644
+--- a/wpa_supplicant/wpa_cli.c
++++ b/wpa_supplicant/wpa_cli.c
+@@ -1412,7 +1412,7 @@ static int wpa_cli_cmd_get_network(struct wpa_ctrl *ctrl, int argc,
+ 
+ static const char *network_fields[] = {
+ 	"ssid", "scan_ssid", "bssid", "bssid_ignore",
+-	"bssid_accept", "psk", "proto", "key_mgmt",
++	"bssid_accept", "psk", "proto", "key_mgmt", "fallback_key_mgmt",
+ 	"bg_scan_period", "pairwise", "group", "auth_alg", "scan_freq",
+ 	"freq_list", "max_oper_chwidth", "ht40", "vht", "vht_center_freq1",
+ 	"vht_center_freq2", "ht", "edmg",
+diff --git a/wpa_supplicant/wpa_supplicant.c b/wpa_supplicant/wpa_supplicant.c
+index d37a994f9..77d9abae5 100644
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -1372,7 +1372,7 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
+ 	if (bss_rsn && (ssid->proto & WPA_PROTO_RSN) &&
+ 	    wpa_parse_wpa_ie(bss_rsn, 2 + bss_rsn[1], &ie) == 0 &&
+ 	    matching_ciphers(ssid, &ie, bss->freq) &&
+-	    (ie.key_mgmt & ssid->key_mgmt)) {
++	    ((ie.key_mgmt & ssid->key_mgmt) || ssid->fallback_key_mgmt)) {
+ 		wpa_dbg(wpa_s, MSG_DEBUG, "RSN: using IEEE 802.11i/D9.0");
+ 		proto = WPA_PROTO_RSN;
+ 	} else if (bss_wpa && (ssid->proto & WPA_PROTO_WPA) &&
+@@ -1536,6 +1536,9 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
+ #endif /* CONFIG_NO_WPA */
+ 
+ 	sel = ie.key_mgmt & ssid->key_mgmt;
++	if (!sel) {
++		sel = ssid->fallback_key_mgmt;
++	}
+ #ifdef CONFIG_SAE
+ 	if (!(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SAE))
+ 		sel &= ~(WPA_KEY_MGMT_SAE | WPA_KEY_MGMT_FT_SAE);
+@@ -1546,8 +1549,8 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
+ 		sel &= ~WPA_KEY_MGMT_FT;
+ #endif /* CONFIG_IEEE80211R */
+ 	wpa_dbg(wpa_s, MSG_DEBUG,
+-		"WPA: AP key_mgmt 0x%x network profile key_mgmt 0x%x; available key_mgmt 0x%x",
+-		ie.key_mgmt, ssid->key_mgmt, sel);
++		"WPA: AP key_mgmt 0x%x network profile key_mgmt 0x%x (0x%x); available key_mgmt 0x%x",
++		ie.key_mgmt, ssid->key_mgmt, ssid->fallback_key_mgmt, sel);
+ 	if (0) {
+ #ifdef CONFIG_IEEE80211R
+ #ifdef CONFIG_SHA384
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index 6619d6ba7..3f273b9f6 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -979,6 +979,10 @@ fast_reauth=1
+ # DPP = Device Provisioning Protocol
+ # If not set, this defaults to: WPA-PSK WPA-EAP
+ #
++# fallback_key_mgmt: a single optional AKM protocol to try as a fallback when
++# none of the protocols configured in key_mgmt are advertised as supported by
++# the AP. If not set, no fallback will be performed.
++#
+ # ieee80211w: whether management frame protection is enabled
+ # 0 = disabled (default unless changed with the global pmf parameter)
+ # 1 = optional
+-- 
+2.40.1
+

@@ -1,0 +1,39 @@
+#!/bin/bash -e
+
+# Copyright (c) 2023 Project CHIP Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Maintainer script to generate the patch series from a hostap WC
+if ! [[ -d "$1/.git" ]]; then
+  echo "Usage: $0 HOSTAP-WC [BRANCH]" >&2
+  exit 1
+fi
+
+pkgdir="$(cd "$(dirname "$0")" && pwd)"
+
+# Get the base hash for the tag 'matter-base' and export a patch
+# set starting from that tag to the specified branch (or HEAD).
+base="$(git -C "$1" rev-parse matter-base)"
+echo "$base" >"$pkgdir/patches.base"
+git -C "$1" format-patch --output-directory "$pkgdir/patches" --quiet --no-numbered "${base}..${2:-HEAD}"
+
+# Prefix patch file names with "o" (for overlay) so they sort after other patches
+cd "$pkgdir/patches"
+shopt -s nullglob
+rm -f -- o*.patch
+for src in *.patch; do
+  dst="$(echo "o${src}" | tr "[:upper:]" "[:lower:]")"
+  mv "$src" "$dst"
+  echo "$dst"
+done
