@@ -24,12 +24,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
+      - name: Prepare meta-data
+        id: prepare
+        shell: bash
+        run: grep '^ARG OPENWRT_VERSION=' .containers/matter-openwrt-build/Dockerfile | cut -c 5- | tee -a "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: elgohr/Publish-Docker-Github-Action@v5
         with:
           name: project-chip/matter-openwrt-build
           context: .containers/matter-openwrt-build
           registry: ghcr.io
+          tags: "latest,${{ steps.prepare.outputs.OPENWRT_VERSION }}"
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           no_push: ${{ github.repository_owner != 'project-chip' || github.event_name != 'push' || github.event.ref != 'refs/heads/main' }}
