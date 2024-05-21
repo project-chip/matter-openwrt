@@ -6,8 +6,6 @@ LABEL org.opencontainers.image.description="Pre-warmed OpenWrt SDK"
 ARG SRC_PACKAGES="glib2 openssl ubus"
 ARG CFG_PACKAGES="glib2 libopenssl libubus"
 
-# Add host tools from WORKDIR (/builder) to PATH
-ENV PATH="/builder/staging_dir/host/bin:$PATH"
 RUN set -x && \
     grep -w 'base\|packages' feeds.conf.default > feeds.conf && \
     ./scripts/feeds update -a && \
