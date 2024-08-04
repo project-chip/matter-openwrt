@@ -46,7 +46,7 @@ jobs:
           context: .containers/matter-openwrt-build
           buildargs: OPENWRT_VERSION
           registry: ghcr.io
-          tags: "latest,${{ env.OPENWRT_VERSION }}"
+          tags: "${{ inputs.openwrt-version-override && '' || 'latest,'}}${{ env.OPENWRT_VERSION }}"
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           no_push: ${{ github.repository_owner != 'project-chip' || github.event_name == 'pull_request' || github.event.ref != 'refs/heads/main' }}
