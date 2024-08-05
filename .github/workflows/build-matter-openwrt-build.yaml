@@ -1,7 +1,6 @@
 name: build matter-openwrt-build container
 
 on:
-  workflow_dispatch:
   pull_request:
     paths:
       - .containers/matter-openwrt-build/**
@@ -10,6 +9,11 @@ on:
     paths:
       - .containers/matter-openwrt-build/**
       - .github/workflows/build-matter-openwrt-build.yaml
+  workflow_dispatch:
+    inputs:
+      openwrt-version-override:
+        type: string
+        description: OpenWrt version number override
 
 permissions:
   packages: write
@@ -27,15 +31,22 @@ jobs:
       - name: Prepare meta-data
         id: prepare
         shell: bash
-        run: grep '^ARG OPENWRT_VERSION=' .containers/matter-openwrt-build/Dockerfile | cut -c 5- | tee -a "$GITHUB_OUTPUT"
+        run: |
+          # Determine OPENWRT_VERSION from override input or Dockerfile
+          if [[ -n "${{ inputs.openwrt-version-override }}" ]]; then
+            echo "OPENWRT_VERSION=${{ inputs.openwrt-version-override }}"
+          else
+            grep '^ARG OPENWRT_VERSION=' .containers/matter-openwrt-build/Dockerfile | cut -c 5-
+          fi | tee -a "$GITHUB_ENV"
 
       - name: Build and push
         uses: elgohr/Publish-Docker-Github-Action@v5
         with:
           name: project-chip/matter-openwrt-build
           context: .containers/matter-openwrt-build
+          buildargs: OPENWRT_VERSION
           registry: ghcr.io
-          tags: "latest,${{ steps.prepare.outputs.OPENWRT_VERSION }}"
+          tags: "latest,${{ env.OPENWRT_VERSION }}"
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           no_push: ${{ github.repository_owner != 'project-chip' || github.event_name == 'pull_request' || github.event.ref != 'refs/heads/main' }}
