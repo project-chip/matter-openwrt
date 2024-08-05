@@ -38,4 +38,4 @@ jobs:
           tags: "latest,${{ steps.prepare.outputs.OPENWRT_VERSION }}"
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          no_push: ${{ github.repository_owner != 'project-chip' || github.event_name != 'push' || github.event.ref != 'refs/heads/main' }}
+          no_push: ${{ github.repository_owner != 'project-chip' || github.event_name == 'pull_request' || github.event.ref != 'refs/heads/main' }}
