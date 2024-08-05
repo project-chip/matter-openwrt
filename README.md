@@ -32,8 +32,6 @@ $ ./scripts/feeds install -a -p matter
 For a minimal configuration, overwrite the `.config` file with the following lines and then run `make defconfig`:
 
 ```
-CONFIG_PACKAGE_wpad-basic-wolfssl=n
-CONFIG_PACKAGE_wpad-openssl=y
 CONFIG_PACKAGE_matter-netman=y
 ```
 
