@@ -26,9 +26,9 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2024-08-03
-PKG_SOURCE_VERSION:=44afdd2d7206a3d4689fb2d73a67cc30ac2ac4bf
-PKG_MIRROR_HASH:=5605a714f0fd7de8d3528d81c367a3a7f886ea49dec4eac0de0bb3d74376d51f
+PKG_SOURCE_DATE:=2024-08-13
+PKG_SOURCE_VERSION:=8eccf68b82022881dfeded94259156433e072183
+PKG_MIRROR_HASH:=672eecb49d071757ec0c63834217394c9171cd13d2858f613c7184edc9093cb2
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
@@ -41,13 +41,14 @@ PKG_BUILD_DEPENDS:=gn/host
 
 include $(INCLUDE_DIR)/package.mk
 
+# Hard-code uid/gid due to https://github.com/openwrt/openwrt/issues/13927
 define Package/matter-netman
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
   DEPENDS:=+libstdcpp +libatomic +libopenssl
-  USERID:=matter:matter
+  USERID:=matter=5540:matter=5540
 endef
 
 define Package/matter-netman/description
@@ -61,9 +62,6 @@ ifeq ($(DUMP)$(filter SUBMODULES:=,$(Download/Defaults)),)
 $(error PKG_SOURCE_SUBMODULES is not supported, ensure https://github.com/openwrt/openwrt/pull/13000 is included in your OpenWrt buildroot)
 endif
 
-# https://github.com/openwrt/openwrt/issues/13016
-TARGET_CXXFLAGS += -Wno-format-nonliteral
-
 # The build environment contains host tools that can be shared between targets
 CHIP_BUILD_ENV_DIR:=$(STAGING_DIR_HOST)/share/chip-build-env
 OUT_DIR:=$(PKG_BUILD_DIR)/out/openwrt
@@ -74,11 +72,24 @@ define Build/Configure
 			--build-env-dir="$(CHIP_BUILD_ENV_DIR)" \
 			--project=examples/network-manager-app/linux \
 			--target=$(GNU_TARGET_NAME) \
+			--logging-backend=syslog \
 			--enable-wifi=no \
 			--enable-openthread=no \
 			--enable-network-layer-ble=no \
-			--enable-tracing-support=no
+			--enable-tracing-support=no \
+			--enable-transport-trace=no \
+			--use-data-model-interface=disabled
 endef
+
+# https://github.com/openwrt/openwrt/issues/13016
+TARGET_CFLAGS += -Wno-format-nonliteral
+
+TARGET_CFLAGS += \
+	-DCHIP_SYSLOG_IDENT=\"matter\"
+	-DCHIP_CONFIG_KVS_PATH=\"/etc/matter/chip_kvs.ini\" \
+	-DFATCONFDIR=\"/etc/matter\" \
+	-DSYSCONFDIR=\"/etc/matter\" \
+	-DLOCALSTATEDIR=\"/etc/matter\"
 
 define Build/Compile
 	$(NINJA) -C $(OUT_DIR) matter-network-manager-app
