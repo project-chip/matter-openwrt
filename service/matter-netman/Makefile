@@ -26,9 +26,9 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2024-08-13
-PKG_SOURCE_VERSION:=8eccf68b82022881dfeded94259156433e072183
-PKG_MIRROR_HASH:=672eecb49d071757ec0c63834217394c9171cd13d2858f613c7184edc9093cb2
+PKG_SOURCE_DATE:=2024-08-28
+PKG_SOURCE_VERSION:=1d1319bd656fbc728fc2d9f796fdf58407e503ac
+PKG_MIRROR_HASH:=f2a46a2d3cc9486c3b4669300e13af9cb1962c75cf7955dd2a682315d8194b7b
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
@@ -73,6 +73,7 @@ define Build/Configure
 			--project=examples/network-manager-app/linux \
 			--target=$(GNU_TARGET_NAME) \
 			--logging-backend=syslog \
+			--enable-access-restrictions=no \
 			--enable-wifi=no \
 			--enable-openthread=no \
 			--enable-network-layer-ble=no \
