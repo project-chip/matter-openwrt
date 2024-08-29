@@ -1,0 +1,121 @@
+diff --git a/etc/openwrt/openthread-br/README.md b/etc/openwrt/openthread-br/README.md
+index a4f918035c..af4b604e29 100644
+--- a/etc/openwrt/openthread-br/README.md
++++ b/etc/openwrt/openthread-br/README.md
+@@ -65,7 +65,7 @@ Start otbr-agent manually:
+ /usr/sbin/otbr-agent -I wpan0 'spinel+hdlc+uart:///dev/ttyACM0?uart-baudrate=115200'
+ ```
+ 
+-Edit the service file `/etc/init.d/otbr-agent` if RCP device is not `/dev/ttyACM0` and then start with:
++Edit the service file `/etc/config/otbr-agent` if RCP device is not `/dev/ttyACM0` and then start with:
+ 
+ ```bash
+ service otbr-agent start
+@@ -80,7 +80,7 @@ If you need to change the thread network interface (`wpan0` by default), you nee
+ ```bash
+ service otbr-firewall stop
+ service otbr-agent stop
+-uci set otbr-agent.service.thread_if_name=wpan1
++uci rename otbr-agent.wpan0=wpan1
+ uci commit otbr-agent
+ service otbr-firewall start
+ service otbr-agent start
+diff --git a/src/openwrt/CMakeLists.txt b/src/openwrt/CMakeLists.txt
+index 8237f38b42..52f90306a9 100644
+--- a/src/openwrt/CMakeLists.txt
++++ b/src/openwrt/CMakeLists.txt
+@@ -28,19 +28,19 @@
+ 
+ add_subdirectory(ubus)
+ 
+-configure_file(otbr-agent.init.in otbr-agent.init)
++configure_file(otbr-agent.init.in otbr-agent.init @ONLY)
+ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/otbr-agent.init
+     DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/init.d
+     RENAME otbr-agent)
+ 
+-configure_file(otbr-agent.uci-config.in otbr-agent.uci-config)
++configure_file(otbr-agent.uci-config.in otbr-agent.uci-config @ONLY)
+ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/otbr-agent.uci-config
+     DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/config
+     RENAME otbr-agent)
+ 
+ 
+ if(OT_FIREWALL)
+-    configure_file(otbr-firewall.init.in otbr-firewall.init)
++    configure_file(otbr-firewall.init.in otbr-firewall.init @ONLY)
+     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/otbr-firewall.init
+         DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/init.d
+         RENAME otbr-firewall)
+diff --git a/src/openwrt/otbr-agent.init.in b/src/openwrt/otbr-agent.init.in
+index 46505ff434..e942234fb9 100755
+--- a/src/openwrt/otbr-agent.init.in
++++ b/src/openwrt/otbr-agent.init.in
+@@ -30,15 +30,46 @@
+ START=90
+ 
+ USE_PROCD=1
++PROG=@CMAKE_INSTALL_FULL_SBINDIR@/otbr-agent
+ 
+-start_service()
++validate_section_otbr()
+ {
+-    local uci_thread_if_name=$(uci -q get otbr-agent.service.thread_if_name)
+-    local uci_infra_if_name=$(uci -q get otbr-agent.service.infra_if_name)
+-    local uci_uart_device=$(uci -q get otbr-agent.service.uart_device)
+-    local uci_uart_baudrate=$(uci -q get otbr-agent.service.uart_baudrate)
++    uci_load_validate otbr-agent otbr-agent "$1" "$2" \
++        'thread_if_name:string' \
++        'infra_if_name:string' \
++        'uart_device:string' \
++        'uart_baudrate:uinteger:115200' \
++        'uart_flow_control:bool:1'
++}
++
++otbr_instance()
++{
++    local cfg="$1"
++    if [ "$2" != 0 ]; then
++        echo "validation failed"
++        return 1
++    fi
++    if [ -z "$infra_if_name" ]; then
++        echo "missing infra_if_name"
++        return 1
++    fi
++    if [ -z "$uart_device" ]; then
++        echo "missing uart_device"
++        return 1
++    fi
++
++    local radio_url="spinel+hdlc+uart://${uart_device}?uart-baudrate=${uart_baudrate}"
++    [ "$uart_flow_control" = 0 ] || radio_url="${radio_url}&uart-flow-control"
++    [ -n "$thread_if_name" ] || thread_if_name="$cfg"
+ 
+     procd_open_instance
+-    procd_set_param command @CMAKE_INSTALL_FULL_SBINDIR@/otbr-agent -I $uci_thread_if_name -B $uci_infra_if_name spinel+hdlc+uart://$uci_uart_device?uart-baudrate=$uci_uart_baudrate trel://$uci_infra_if_name
++    procd_set_param command "$PROG" -I "$thread_if_name" -B "$infra_if_name" "$radio_url" "trel://${infra_if_name}"
++    procd_set_param respawn
+     procd_close_instance
+ }
++
++start_service()
++{
++    config_load otbr-agent
++    config_foreach validate_section_otbr otbr-agent otbr_instance
++}
+diff --git a/src/openwrt/otbr-agent.uci-config.in b/src/openwrt/otbr-agent.uci-config.in
+index 855d708852..d80d91b5ff 100644
+--- a/src/openwrt/otbr-agent.uci-config.in
++++ b/src/openwrt/otbr-agent.uci-config.in
+@@ -1,5 +1,5 @@
+-config otbr-agent 'service'
+-	option thread_if_name "wpan0"
+-	option infra_if_name "eth0"
+-	option uart_device "/dev/ttyACM0"
+-	option uart_baudrate 115200
++config otbr-agent 'wpan0'
++	option infra_if_name '@OTBR_INFRA_IF_NAME@'
++	option uart_device '/dev/ttyACM0'
++	option uart_baudrate '115200'
++	option uart_flow_control '1'
