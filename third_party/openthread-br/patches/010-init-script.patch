@@ -11,7 +11,7 @@ index a4f918035c..af4b604e29 100644
  
  ```bash
  service otbr-agent start
-@@ -80,7 +80,7 @@ If you need to change the thread network interface (`wpan0` by default), you nee
+@@ -80,7 +80,7 @@ If you need to change the thread network interface (`wpan0` by default), you need
  ```bash
  service otbr-firewall stop
  service otbr-agent stop

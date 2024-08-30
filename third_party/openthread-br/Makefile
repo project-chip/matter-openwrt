@@ -1,5 +1,5 @@
 #  Copyright (c) 2020, The OpenThread Authors.
-#  Copyright (c) 2023-2024 Project CHIP Authors
+#  Copyright (c) 2024 Project CHIP Authors
 #
 #  All rights reserved.
 #
