@@ -4,3 +4,4 @@ CONFIG_PACKAGE_wpad-basic-openssl=n
 CONFIG_PACKAGE_wpad-basic-wolfssl=n
 CONFIG_PACKAGE_wpad-openssl=y
 CONFIG_PACKAGE_matter-netman=y
+CONFIG_PACKAGE_openthread-br=y
