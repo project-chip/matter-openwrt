@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-START=80
+START=90
 
 USE_PROCD=1
 PROG=/usr/sbin/matter-network-manager-app
