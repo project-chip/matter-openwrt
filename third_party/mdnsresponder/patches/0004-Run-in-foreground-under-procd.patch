@@ -1,0 +1,25 @@
+From 9506c22107cb110abeeb94bb6ddeda15c8fc38db Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 25 Sep 2024 18:13:45 +1200
+Subject: [PATCH] Run in foreground under procd
+
+---
+ mDNSPosix/PosixDaemon.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mDNSPosix/PosixDaemon.c b/mDNSPosix/PosixDaemon.c
+index c9867ef..4861895 100644
+--- a/mDNSPosix/PosixDaemon.c
++++ b/mDNSPosix/PosixDaemon.c
+@@ -113,7 +113,7 @@ mDNSlocal void ParseCmdLineArgs(int argc, char **argv)
+     }
+     if (!mDNS_DebugMode)
+     {
+-        int result = daemon(0, 0);
++        int result = 0; //daemon(0, 0);
+         if (result != 0) { LogMsg("Could not run as daemon - exiting"); exit(result); }
+ #if __APPLE__
+         LogMsg("The POSIX mdnsd should only be used on OS X for testing - exiting");
+-- 
+2.39.2
+

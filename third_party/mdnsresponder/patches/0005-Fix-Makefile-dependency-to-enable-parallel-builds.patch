@@ -1,0 +1,25 @@
+From 0ca713d18def127918fdb80c8d77806c592d5106 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 26 Sep 2024 12:11:01 +1200
+Subject: [PATCH] Fix Makefile dependency to enable parallel builds
+
+---
+ mDNSPosix/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mDNSPosix/Makefile b/mDNSPosix/Makefile
+index 0417065..3d58d7f 100755
+--- a/mDNSPosix/Makefile
++++ b/mDNSPosix/Makefile
+@@ -282,7 +282,7 @@ $(BUILDDIR)/libdns_sd.$(LDSUFFIX): $(CLIENTLIBOBJS)
+ Clients: setup libdns_sd ../Clients/build/dns-sd
+ 	@echo "Clients done"
+ 
+-../Clients/build/dns-sd: ../Clients/dns-sd.c
++../Clients/build/dns-sd: ../Clients/dns-sd.c libdns_sd
+ 	$(MAKE) -C ../Clients DEBUG=$(DEBUG) SUPMAKE_CFLAGS="$(MDNSCFLAGS)"
+ 
+ # nss_mdns target builds the Name Service Switch module
+-- 
+2.39.2
+
