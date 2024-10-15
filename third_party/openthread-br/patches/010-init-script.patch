@@ -68,7 +68,7 @@ index 46505ff434..e942234fb9 100755
 +        'thread_if_name:string' \
 +        'infra_if_name:string' \
 +        'uart_device:string' \
-+        'uart_baudrate:uinteger:115200' \
++        'uart_baudrate:uinteger:460800' \
 +        'uart_flow_control:bool:1'
 +}
 +
@@ -117,5 +117,5 @@ index 855d708852..d80d91b5ff 100644
 +config otbr-agent 'wpan0'
 +	option infra_if_name '@OTBR_INFRA_IF_NAME@'
 +	option uart_device '/dev/ttyACM0'
-+	option uart_baudrate '115200'
++	option uart_baudrate '460800'
 +	option uart_flow_control '1'
