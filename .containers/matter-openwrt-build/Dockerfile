@@ -1,10 +1,10 @@
-ARG OPENWRT_VERSION=23.05.4
+ARG OPENWRT_VERSION=23.05.5
 FROM ghcr.io/openwrt/sdk:x86-generic-${OPENWRT_VERSION}
 LABEL org.opencontainers.image.description="Pre-warmed OpenWrt SDK"
 
 # Core packages to pre-build to speed up CI builds
-ARG SRC_PACKAGES="glib2 openssl ubus"
-ARG CFG_PACKAGES="glib2 libopenssl libubus"
+ARG SRC_PACKAGES="glib2 openssl ubus avahi"
+ARG CFG_PACKAGES="glib2 libopenssl libubus libavahi-client"
 
 RUN set -x && \
     grep -w 'base\|packages' feeds.conf.default > feeds.conf && \
