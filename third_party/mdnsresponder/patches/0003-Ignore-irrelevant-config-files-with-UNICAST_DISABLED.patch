@@ -1,4 +1,4 @@
-From b1aff590a9adbc6133819e56aef197fd768134a2 Mon Sep 17 00:00:00 2001
+From 98a6185e0c7038be577dacdcb1b965c24acaabe2 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Wed, 25 Sep 2024 12:40:17 +1200
 Subject: [PATCH] Ignore irrelevant config files with UNICAST_DISABLED
@@ -10,10 +10,10 @@ Subject: [PATCH] Ignore irrelevant config files with UNICAST_DISABLED
  3 files changed, 7 insertions(+), 1 deletion(-)
 
 diff --git a/mDNSCore/uDNS.c b/mDNSCore/uDNS.c
-index c9e9bcd..fe8d372 100644
+index a67fdc5bd..72b28377b 100644
 --- a/mDNSCore/uDNS.c
 +++ b/mDNSCore/uDNS.c
-@@ -7277,7 +7277,7 @@ mDNSexport mStatus mDNS_SetSecretForDomain(mDNS *m, DomainAuthInfo *info, const
+@@ -7363,7 +7363,7 @@ mDNSexport mStatus mDNS_SetSecretForDomain(mDNS *m, DomainAuthInfo *info, const
      return mStatus_UnsupportedErr;
  }
  
@@ -23,7 +23,7 @@ index c9e9bcd..fe8d372 100644
      (void) InterfaceID;
      (void) searchIndex;
 diff --git a/mDNSPosix/PosixDaemon.c b/mDNSPosix/PosixDaemon.c
-index beda41e..c9867ef 100644
+index 1e977ddf3..7456dcaf0 100644
 --- a/mDNSPosix/PosixDaemon.c
 +++ b/mDNSPosix/PosixDaemon.c
 @@ -50,9 +50,11 @@ extern int daemon(int, int);
@@ -55,10 +55,10 @@ index beda41e..c9867ef 100644
  }
  
 diff --git a/mDNSPosix/mDNSPosix.c b/mDNSPosix/mDNSPosix.c
-index 3b761d0..51cbd9b 100644
+index 9d1880933..5fb120751 100644
 --- a/mDNSPosix/mDNSPosix.c
 +++ b/mDNSPosix/mDNSPosix.c
-@@ -1852,10 +1852,12 @@ mDNSexport mStatus mDNSPlatformInit(mDNS *const m)
+@@ -1884,10 +1884,12 @@ mDNSexport mStatus mDNSPlatformInit(mDNS *const m)
      // Tell mDNS core about the network interfaces on this machine.
      if (err == mStatus_NoError) err = SetupInterfaceList(m);
  

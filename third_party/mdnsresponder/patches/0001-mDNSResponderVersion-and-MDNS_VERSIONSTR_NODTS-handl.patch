@@ -1,4 +1,4 @@
-From a3a7a5aed8bab31a9b9bc7f564d062e143a83d71 Mon Sep 17 00:00:00 2001
+From fc8372d45189e31c6193ab84efb339f2a1edfef8 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Tue, 24 Sep 2024 19:47:40 +1200
 Subject: [PATCH] mDNSResponderVersion and MDNS_VERSIONSTR_NODTS handling
@@ -9,10 +9,10 @@ Subject: [PATCH] mDNSResponderVersion and MDNS_VERSIONSTR_NODTS handling
  2 files changed, 18 insertions(+), 6 deletions(-)
 
 diff --git a/mDNSPosix/PosixDaemon.c b/mDNSPosix/PosixDaemon.c
-index 9a0f692..beda41e 100644
+index a91734579..1e977ddf3 100644
 --- a/mDNSPosix/PosixDaemon.c
 +++ b/mDNSPosix/PosixDaemon.c
-@@ -270,10 +270,18 @@ asm (".desc ___crashreporter_info__, 0x10");
+@@ -279,10 +279,18 @@ asm (".desc ___crashreporter_info__, 0x10");
  #endif
  
  // For convenience when using the "strings" command, this is the last thing in the file
@@ -37,7 +37,7 @@ index 9a0f692..beda41e 100644
  #endif
 +;
 diff --git a/mDNSShared/dnssd_clientlib.c b/mDNSShared/dnssd_clientlib.c
-index a1d98d9..75bece2 100644
+index a1d98d99a..75bece206 100644
 --- a/mDNSShared/dnssd_clientlib.c
 +++ b/mDNSShared/dnssd_clientlib.c
 @@ -372,7 +372,11 @@ DNSServiceErrorType DNSSD_API TXTRecordGetItemAtIndex

@@ -1,5 +1,5 @@
 # Copyright (c) 2024 Apple Inc.
-# Copyright (c) 2024 Project CHIP Authors
+# Copyright (c) 2024-2025 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,12 +16,12 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mDNSResponder
-PKG_VERSION:=2200.140.11
+PKG_VERSION:=2559.80.8
 PKG_RELEASE:=1
 
 PKG_SOURCE:=mDNSResponder-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://github.com/apple-oss-distributions/mDNSResponder/archive/refs/tags
-PKG_HASH:=f52963497e8baf650e6640fb5769ffbad7c6e45eea833dec2a0ca86a3ca55928
+PKG_HASH:=96c3437867ede8d32ac83871b677329562fd16f7af60562a5d32afc12ef4beac
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/mDNSResponder
@@ -124,6 +124,7 @@ MAKE_FLAGS+=os=linux-uclibc tls=no CFLAGS_DEBUGGING= LD="$(TARGET_CC)" STRIP=:
 TARGET_CFLAGS+=\
 	-DmDNSResponderVersion=$(PKG_VERSION)-$(PKG_RELEASE) \
 	-DMDNS_VERSIONSTR_NODTS \
+	-DNO_PID_FILE \
 	-DUNICAST_DISABLED \
 	-DMDNS_DEBUGMSGS=$(if CONFIG_MDNSD_DEBUG_LOGGING,1,0)
 

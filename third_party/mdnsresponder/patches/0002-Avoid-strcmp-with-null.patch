@@ -1,4 +1,4 @@
-From edf0afdd8378fd2ce6a2aca050dfdb8a79eab372 Mon Sep 17 00:00:00 2001
+From 5f2059bd6628c7b6201e51d67388769948382b46 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Tue, 24 Sep 2024 19:48:17 +1200
 Subject: [PATCH] Avoid strcmp with null
@@ -8,10 +8,10 @@ Subject: [PATCH] Avoid strcmp with null
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/mDNSShared/mDNSDebug.c b/mDNSShared/mDNSDebug.c
-index 7a4ca19..d449dde 100644
+index fb1161721..60aa5597a 100644
 --- a/mDNSShared/mDNSDebug.c
 +++ b/mDNSShared/mDNSDebug.c
-@@ -71,7 +71,7 @@ mDNSlocal void LogMsgWithLevelv(os_log_t category, os_log_type_t level, const ch
+@@ -67,7 +67,7 @@ mDNSlocal void LogMsgWithLevelv(os_log_t category, os_log_type_t level, const ch
  mDNSlocal void LogMsgWithLevelv(const char *category, mDNSLogLevel_t level, const char *format, va_list args)
  {
      // Do not print the logs if the log category is MDNS_LOG_CATEGORY_DISABLED.
