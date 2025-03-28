@@ -1,4 +1,4 @@
-From 65b1836cbd9c2976a7473e3fb5816eda48bcfa75 Mon Sep 17 00:00:00 2001
+From 973254ca1d123368ef7feb774bcd90cc4958d3e1 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Tue, 15 Oct 2024 13:03:31 +1300
 Subject: [PATCH] Improve rtnetlink parsing/logging and ignore duplicate
@@ -9,10 +9,10 @@ Subject: [PATCH] Improve rtnetlink parsing/logging and ignore duplicate
  1 file changed, 131 insertions(+), 57 deletions(-)
 
 diff --git a/mDNSPosix/mDNSPosix.c b/mDNSPosix/mDNSPosix.c
-index 51cbd9b..ef18773 100644
+index 5fb120751..0c6e8a5d8 100644
 --- a/mDNSPosix/mDNSPosix.c
 +++ b/mDNSPosix/mDNSPosix.c
-@@ -1606,87 +1606,159 @@ mDNSlocal mStatus OpenIfNotifySocket(int *pFD)
+@@ -1638,87 +1638,159 @@ mDNSlocal mStatus OpenIfNotifySocket(int *pFD)
  }
  
  #if MDNS_DEBUGMSGS
@@ -227,7 +227,7 @@ index 51cbd9b..ef18773 100644
      }
  
      return result;
-@@ -1721,7 +1793,7 @@ mDNSlocal void      PrintRoutingSocketMsg(const struct ifa_msghdr *pRSMsg)
+@@ -1753,7 +1825,7 @@ mDNSlocal void      PrintRoutingSocketMsg(const struct ifa_msghdr *pRSMsg)
  }
  #endif
  
@@ -236,7 +236,7 @@ index 51cbd9b..ef18773 100644
  // Read through the messages on sd and if any indicate that any interface records should
  // be torn down and rebuilt, return affected indices as a bitmask. Otherwise return 0.
  {
-@@ -1730,6 +1802,8 @@ mDNSlocal mDNSu32       ProcessRoutingNotification(int sd)
+@@ -1762,6 +1834,8 @@ mDNSlocal mDNSu32       ProcessRoutingNotification(int sd)
      struct ifa_msghdr       *pRSMsg = (struct ifa_msghdr*) buff;
      mDNSu32 result = 0;
  
@@ -245,7 +245,7 @@ index 51cbd9b..ef18773 100644
      readCount = read(sd, buff, sizeof buff);
      if (readCount < (ssize_t) sizeof(struct ifa_msghdr))
          return mStatus_UnsupportedErr;      // cannot decipher message
-@@ -1768,7 +1842,7 @@ mDNSlocal void InterfaceChangeCallback(int fd, void *context)
+@@ -1800,7 +1874,7 @@ mDNSlocal void InterfaceChangeCallback(int fd, void *context)
  
      do
      {

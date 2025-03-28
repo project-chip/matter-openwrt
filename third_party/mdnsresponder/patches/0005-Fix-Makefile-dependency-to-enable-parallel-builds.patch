@@ -1,4 +1,4 @@
-From 0ca713d18def127918fdb80c8d77806c592d5106 Mon Sep 17 00:00:00 2001
+From 5d8198e8bc273adf0c7b4d752805bda9267cde53 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 26 Sep 2024 12:11:01 +1200
 Subject: [PATCH] Fix Makefile dependency to enable parallel builds
@@ -8,7 +8,7 @@ Subject: [PATCH] Fix Makefile dependency to enable parallel builds
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/mDNSPosix/Makefile b/mDNSPosix/Makefile
-index 0417065..3d58d7f 100755
+index 134af2a79..3d56a9e65 100755
 --- a/mDNSPosix/Makefile
 +++ b/mDNSPosix/Makefile
 @@ -282,7 +282,7 @@ $(BUILDDIR)/libdns_sd.$(LDSUFFIX): $(CLIENTLIBOBJS)
