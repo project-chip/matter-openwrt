@@ -15,7 +15,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=matter-netman
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_SOURCE_URL:=https://github.com/project-chip/connectedhomeip.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
@@ -28,7 +28,7 @@ PKG_SOURCE_SUBMODULES:=\
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
 PKG_SOURCE_DATE:=2024-08-28
 PKG_SOURCE_VERSION:=1d1319bd656fbc728fc2d9f796fdf58407e503ac
-PKG_MIRROR_HASH:=f2a46a2d3cc9486c3b4669300e13af9cb1962c75cf7955dd2a682315d8194b7b
+PKG_MIRROR_HASH:=c06e00dff17cf08c891cdfa08712fe357864535036ec680cc2b788970b332743
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
@@ -41,26 +41,19 @@ PKG_BUILD_DEPENDS:=gn/host
 
 include $(INCLUDE_DIR)/package.mk
 
-# Hard-code uid/gid due to https://github.com/openwrt/openwrt/issues/13927
 define Package/matter-netman
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
   DEPENDS:=+libstdcpp +libatomic +libopenssl
-  USERID:=matter=5540:matter=5540
+  USERID:=matter:matter
 endef
 
 define Package/matter-netman/description
   Matter Network Infrastructure Manager Daemon
   Integrates a router / access point with the Matter IoT ecosystem.
 endef
-
-# https://github.com/project-chip/matter-openwrt/issues/2
-# PKG_SOURCE_SUBMODULES support is in OpenWrt main but not 23.x releases.
-ifeq ($(DUMP)$(filter SUBMODULES:=,$(Download/Defaults)),)
-$(error PKG_SOURCE_SUBMODULES is not supported, ensure https://github.com/openwrt/openwrt/pull/13000 is included in your OpenWrt buildroot)
-endif
 
 # The build environment contains host tools that can be shared between targets
 CHIP_BUILD_ENV_DIR:=$(STAGING_DIR_HOST)/share/chip-build-env
@@ -86,7 +79,7 @@ endef
 TARGET_CFLAGS += -Wno-format-nonliteral
 
 TARGET_CFLAGS += \
-	-DCHIP_SYSLOG_IDENT=\"matter\"
+	-DCHIP_SYSLOG_IDENT=\"matter\" \
 	-DCHIP_CONFIG_KVS_PATH=\"/etc/matter/chip_kvs.ini\" \
 	-DFATCONFDIR=\"/etc/matter\" \
 	-DSYSCONFDIR=\"/etc/matter\" \
@@ -100,6 +93,10 @@ define Package/matter-netman/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d
 	$(INSTALL_BIN) $(OUT_DIR)/matter-network-manager-app $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/matter.init $(1)/etc/init.d/matter
+endef
+
+define Package/matter-netman/conffiles
+/etc/matter/
 endef
 
 $(eval $(call BuildPackage,matter-netman))
