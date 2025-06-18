@@ -1,4 +1,4 @@
-ARG OPENWRT_VERSION=23.05.5
+ARG OPENWRT_VERSION=24.10.1
 FROM ghcr.io/openwrt/sdk:x86-generic-${OPENWRT_VERSION}
 LABEL org.opencontainers.image.description="Pre-warmed OpenWrt SDK"
 
@@ -11,7 +11,7 @@ RUN set -x && \
     ./scripts/feeds update -a && \
     ./scripts/feeds install ${SRC_PACKAGES} && \
     echo "CONFIG_ALL=n" >.config && \
-    echo "CONFIG_AUTOREMOVE=n" >.config && \
+    echo "CONFIG_AUTOREMOVE=n" >>.config && \
     for pkg in ${CFG_PACKAGES}; do echo "CONFIG_PACKAGE_${pkg}=y"; done >>.config && \
     make defconfig && \
     for pkg in ${SRC_PACKAGES}; do make -j "$(nproc)" "package/${pkg}/compile"; done

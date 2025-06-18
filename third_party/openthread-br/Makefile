@@ -29,14 +29,14 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=openthread-br
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 
 PKG_SOURCE_DATE:=2024-08-24
 PKG_SOURCE_VERSION:=f2c799d154aed339e66c0dd85f6109bd9d91c5a9
-PKG_MIRROR_HASH:=e79e70c0e6ca9341ff820915e4a0926c920cd5fe9bc4b81813f3e99e5086bd07
+PKG_MIRROR_HASH:=9d4e9b7366b04f4d97a615c504ebd7ce2bcf62b5fdaa3d437c8a2c76632ce067
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE
@@ -87,6 +87,17 @@ This variant of the package uses Avahi for mDNS / DNS-SD.
 endef
 
 
+define Package/openthread-br-luci
+  $(call Package/openthread-br/Default)
+  TITLE+= (LuCI module)
+  DEPENDS:=+luci-lua-runtime @PACKAGE_openthread-br||PACKAGE_openthread-br-avahi
+endef
+
+define Package/openthread-br-luci/description
+LuCI user interface for the OpenThread Border Router.
+endef
+
+
 # Disable firewall integration due to https://github.com/openthread/ot-br-posix/issues/1675
 CMAKE_OPTIONS+= \
 	-DCMAKE_BUILD_TYPE=$(if $(CONFIG_DEBUG),Debug,Release) \
@@ -124,7 +135,16 @@ define Package/openthread-br/install
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(PKG_INSTALL_DIR)/etc/config/* $(1)/etc/config
+endef
 
+define Package/openthread-br/conffiles
+/etc/openthread/
+endef
+
+Package/openthread-br-avahi/install=$(Package/openthread-br/install)
+Package/openthread-br-avahi/conffiles=$(Package/openthread-br/conffiles)
+
+define Package/openthread-br-luci/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller/admin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/openwrt/controller/thread.lua $(1)/usr/lib/lua/luci/controller/admin
 
@@ -135,12 +155,6 @@ define Package/openthread-br/install
 	$(CP) $(PKG_BUILD_DIR)/src/openwrt/handle_error.js $(1)/www/luci-static/resources
 endef
 
-define Package/openthread-br/conffiles
-/etc/openthread/
-endef
-
-Package/openthread-br-avahi/install=$(Package/openthread-br/install)
-Package/openthread-br-avahi/conffiles=$(Package/openthread-br/conffiles)
-
 $(eval $(call BuildPackage,openthread-br))
 $(eval $(call BuildPackage,openthread-br-avahi))
+$(eval $(call BuildPackage,openthread-br-luci))

@@ -17,12 +17,11 @@ jobs:
       - name: Build
         uses: addnab/docker-run-action@v3
         with:
-          image: ghcr.io/project-chip/matter-openwrt-build:23.05.4
+          image: ghcr.io/project-chip/matter-openwrt-build:24.10.1
           options: --volume ${{ github.workspace }}:/workspace
           shell: bash
           run: |
             set -x
-            wget -qO - https://github.com/openwrt/openwrt/pull/13000.patch | patch -p1
             echo "src-link --force matter /workspace" >>feeds.conf
             ./scripts/feeds update matter
             ./scripts/feeds install -a -p matter
