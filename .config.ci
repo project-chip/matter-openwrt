@@ -1,4 +1,6 @@
 CONFIG_ALL=n
+CONFIG_AUTOREMOVE=n
+CONFIG_AUTOREBUILD=n
 CONFIG_PACKAGE_wpad-basic-mbedtls=n
 CONFIG_PACKAGE_wpad-basic-openssl=n
 CONFIG_PACKAGE_wpad-basic-wolfssl=n
