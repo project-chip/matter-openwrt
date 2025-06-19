@@ -11,6 +11,8 @@ RUN set -x && \
     ./scripts/feeds update -a && \
     ./scripts/feeds install ${SRC_PACKAGES} && \
     echo "CONFIG_ALL=n" >.config && \
+    echo "CONFIG_AUTOREMOVE=n" >>.config && \
+    echo "CONFIG_AUTOREBUILD=n" >>.config && \
     for pkg in ${CFG_PACKAGES}; do echo "CONFIG_PACKAGE_${pkg}=y"; done >>.config && \
     make defconfig && \
     for pkg in ${SRC_PACKAGES}; do make -j "$(nproc)" "package/${pkg}/compile"; done
