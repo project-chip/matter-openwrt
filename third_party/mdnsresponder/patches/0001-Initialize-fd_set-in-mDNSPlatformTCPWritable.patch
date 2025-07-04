@@ -1,0 +1,24 @@
+From 79786a338918ffd57bf8de1707492262be786fbf Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 2 Jul 2025 10:02:10 +1200
+Subject: [PATCH] Initialize fd_set in mDNSPlatformTCPWritable
+
+---
+ mDNSPosix/mDNSPosix.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/mDNSPosix/mDNSPosix.c b/mDNSPosix/mDNSPosix.c
+index cf902be9c..c7c5a1cb7 100644
+--- a/mDNSPosix/mDNSPosix.c
++++ b/mDNSPosix/mDNSPosix.c
+@@ -833,6 +833,7 @@ mDNSexport mDNSBool mDNSPlatformTCPWritable(TCPSocket *sock)
+         LogMsg("ERROR: mDNSPlatformTCPWritable called on an fd that won't fit in an fd_set.");
+         return mDNStrue; // hope for the best?
+     }
++    FD_ZERO(&w);
+     FD_SET(sock->events.fd, &w);
+     tv.tv_sec = tv.tv_usec = 0;
+     count = select(nfds, NULL, &w, NULL, &tv);
+-- 
+2.39.2
+
