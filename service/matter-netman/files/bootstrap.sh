@@ -66,7 +66,10 @@ matter_bootstrap() {
 	chown matter:matter /etc/matter
 	chmod 0700 /etc/matter
 	local ini=/etc/matter/chip_factory.ini
-	[ -s "$ini" ] || generate_factory_ini >"$ini"
+	if ! [ -s "$ini" ]; then
+		generate_factory_ini >"${ini}.tmp"
+		mv "${ini}.tmp" "$ini"
+	fi
 }
 
 [ -n "$INCLUDE_ONLY" ] || matter_bootstrap
