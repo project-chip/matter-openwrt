@@ -36,9 +36,11 @@ PKG_MIRROR_HASH:=ad81137221dafc0302c70cb90a03ab2472a02ee3c03e8cef8edcba26fd34201
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
 
-# Python 3.11 is required for code generation; use the python3 host package if necessary
+# Python 3.11 is required for code generation; use the python3 host package if necessary.
+# Because it is installed with a broken SSL configuration in some cases (including the
+# OpenWrt SDK docker images), we use the python3-host-ssl package to work around this.
 HAVE_PYTHON_311:=$(shell $(STAGING_DIR_HOST)/bin/$(PYTHON) -c 'import sys; print(sys.version_info>=(3,11) or "")')
-PKG_BUILD_DEPENDS:=gn/host $(if $(HAVE_PYTHON_311),,python3/host)
+PKG_BUILD_DEPENDS:=gn/host $(if $(HAVE_PYTHON_311),,python3-host-ssl/host)
 PKG_BUILD_PARALLEL:=1
 
 include $(INCLUDE_DIR)/package.mk
