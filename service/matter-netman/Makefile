@@ -111,12 +111,12 @@ CONFIGURE_OPTIONS+= --crypto=openssl
 endif
 
 # Configuration / persistence
-CONFIG_DIR:=/etc/matter
+CONF_DIR:=/etc/matter
 TARGET_CFLAGS+=\
-	-DCHIP_CONFIG_KVS_PATH=\"$(CONFIG_DIR)/chip_kvs.ini\" \
-	-DFATCONFDIR=\"$(CONFIG_DIR)\" \
-	-DSYSCONFDIR=\"$(CONFIG_DIR)\" \
-	-DLOCALSTATEDIR=\"$(CONFIG_DIR)\"
+	-DCHIP_CONFIG_KVS_PATH=\"$(CONF_DIR)/chip_kvs.ini\" \
+	-DFATCONFDIR=\"$(CONF_DIR)\" \
+	-DSYSCONFDIR=\"$(CONF_DIR)\" \
+	-DLOCALSTATEDIR=\"$(CONF_DIR)\"
 
 # Device Information. Runtime information is configured by bootstrap.sh
 include $(INCLUDE_DIR)/version.mk
@@ -159,7 +159,7 @@ Package/matter-netman-mbedtls/install=$(Package/matter-netman/default/install)
 Package/matter-netman-openssl/install=$(Package/matter-netman/default/install)
 
 define Package/matter-netman/default/conffiles
-$(CONFIG_DIR)/
+$(CONF_DIR)/
 endef
 
 Package/matter-netman-mbedtls/conffiles=$(Package/matter-netman/default/conffiles)
