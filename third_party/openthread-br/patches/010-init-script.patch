@@ -113,7 +113,7 @@ index 855d708852..d80d91b5ff 100644
 -	option thread_if_name "wpan0"
 -	option infra_if_name "eth0"
 -	option uart_device "/dev/ttyACM0"
--	option uart_baudrate 115200
+-	option uart_baudrate 460800
 +config otbr-agent 'wpan0'
 +	option infra_if_name '@OTBR_INFRA_IF_NAME@'
 +	option uart_device '/dev/ttyACM0'

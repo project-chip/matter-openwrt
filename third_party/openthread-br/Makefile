@@ -29,17 +29,19 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=openthread-br
-PKG_RELEASE:=3
+PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 
-PKG_SOURCE_DATE:=2024-08-24
-PKG_SOURCE_VERSION:=f2c799d154aed339e66c0dd85f6109bd9d91c5a9
-PKG_MIRROR_HASH:=9d4e9b7366b04f4d97a615c504ebd7ce2bcf62b5fdaa3d437c8a2c76632ce067
+PKG_SOURCE_DATE:=2025-07-18
+PKG_SOURCE_VERSION:=4576f30af33f9b9060a343818723065918091362
+PKG_MIRROR_HASH:=df5d71fa22e05878b0c39d991d63d86714d8ba827a7564edbea99979004d9685
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE
+
+PKG_CONFIG_DEPENDS:=CONFIG_DEBUG CONFIG_OPENTHREADBR_SHARED_MBEDTLS
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
@@ -49,7 +51,7 @@ define Package/openthread-br/Default
   CATEGORY:=Network
   TITLE:=OpenThread Border Router
   URL:=https://github.com/openthread/ot-br-posix
-  DEPENDS:=+libstdcpp +libjson-c +libubus +libblobmsg-json +kmod-usb-acm +kmod-tun
+  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libblobmsg-json +kmod-usb-acm +kmod-tun
 endef
 
 define Package/openthread-br/Default/description
@@ -71,6 +73,18 @@ $(call Package/openthread-br/Default/description)
 This default variant of the package uses mDNSResponder for mDNS / DNS-SD.
 endef
 
+define Package/openthread-br/config
+if PACKAGE_openthread-br || PACKAGE_openthread-br-avahi
+config OPENTHREADBR_SHARED_MBEDTLS
+	bool "Use shared mbedTLS library for OpenThread"
+	default n
+	help
+	  Use the shared mbedTLS library provided by the libmbedtls package,
+	  instead of statically linking the copy bundled with OpenThread.
+	  This saves around 200kB of flash, but libmbedtls must be compiled
+	  with MBEDTLS_KEY_EXCHANGE_ECJPAKE_ENABLED set to Y.
+endif
+endef
 
 define Package/openthread-br-avahi
   $(call Package/openthread-br/Default)
@@ -114,15 +128,23 @@ CMAKE_OPTIONS+= \
 	-DOT_READLINE=OFF
 
 # OpenWrt uses /var/run instead of /run
-TARGET_CFLAGS += \
+TARGET_CFLAGS+= \
 	-DOPENTHREAD_POSIX_CONFIG_DAEMON_SOCKET_BASENAME=\\\"/var/run/openthread-%s\\\" \
 	-DOPENTHREAD_CONFIG_LOG_PREPEND_UPTIME=0 \
 	-DOPENTHREAD_CONFIG_LOG_PREPEND_LEVEL=0
 
+ifneq ($(CONFIG_OPENTHREADBR_SHARED_MBEDTLS),)
+CMAKE_OPTIONS+= \
+	-DOT_EXTERNAL_MBEDTLS="mbedtls;mbedcrypto;mbedx509" \
+	-DOT_BUILTIN_MBEDTLS_MANAGEMENT=ON
+# MBEDTLS_SSL_EXPORT_KEYS is no longer defined (due to no longer being optional) in mbedTLS >= 3.1.0
+TARGET_CFLAGS+= -DMBEDTLS_SSL_EXPORT_KEYS
+endif
+
 ifeq ($(BUILD_VARIANT),avahi)
-CMAKE_OPTIONS+= -DOTBR_MDNS="avahi"
+CMAKE_OPTIONS+= -DOTBR_MDNS=avahi
 else
-CMAKE_OPTIONS+= -DOTBR_MDNS="mDNSResponder"
+CMAKE_OPTIONS+= -DOTBR_MDNS=mDNSResponder
 endif
 
 define Package/openthread-br/install
