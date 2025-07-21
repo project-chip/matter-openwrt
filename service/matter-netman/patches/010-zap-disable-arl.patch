@@ -1,8 +1,8 @@
 diff --git a/examples/network-manager-app/network-manager-common/network-manager-app.zap b/examples/network-manager-app/network-manager-common/network-manager-app.zap
-index 240cd495a7..e7103d3730 100644
+index 853648e1f2..b6f9170856 100644
 --- a/examples/network-manager-app/network-manager-common/network-manager-app.zap
 +++ b/examples/network-manager-app/network-manager-common/network-manager-app.zap
-@@ -314,24 +314,7 @@
+@@ -224,24 +224,7 @@
            "define": "ACCESS_CONTROL_CLUSTER",
            "side": "server",
            "enabled": 1,
@@ -28,7 +28,7 @@ index 240cd495a7..e7103d3730 100644
            "attributes": [
              {
                "name": "ACL",
-@@ -413,38 +396,6 @@
+@@ -323,38 +306,6 @@
                "maxInterval": 65534,
                "reportableChange": 0
              },
@@ -58,7 +58,7 @@ index 240cd495a7..e7103d3730 100644
 -              "storageOption": "External",
 -              "singleton": 0,
 -              "bounded": 0,
--              "defaultValue": "",
+-              "defaultValue": null,
 -              "reportable": 1,
 -              "minInterval": 1,
 -              "maxInterval": 65534,
@@ -67,33 +67,3 @@ index 240cd495a7..e7103d3730 100644
              {
                "name": "GeneratedCommandList",
                "code": 65528,
-@@ -503,7 +454,7 @@
-               "storageOption": "RAM",
-               "singleton": 0,
-               "bounded": 0,
--              "defaultValue": "1",
-+              "defaultValue": "0",
-               "reportable": 1,
-               "minInterval": 1,
-               "maxInterval": 65534,
-@@ -540,20 +491,6 @@
-               "mfgCode": null,
-               "side": "server",
-               "included": 1
--            },
--            {
--              "name": "AccessRestrictionEntryChanged",
--              "code": 2,
--              "mfgCode": null,
--              "side": "server",
--              "included": 1
--            },
--            {
--              "name": "FabricRestrictionReviewUpdate",
--              "code": 3,
--              "mfgCode": null,
--              "side": "server",
--              "included": 1
-             }
-           ]
-         },

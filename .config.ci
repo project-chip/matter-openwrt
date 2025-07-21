@@ -1,10 +1,8 @@
 CONFIG_ALL=n
 CONFIG_AUTOREMOVE=n
 CONFIG_AUTOREBUILD=n
-CONFIG_PACKAGE_wpad-basic-mbedtls=n
-CONFIG_PACKAGE_wpad-basic-openssl=n
-CONFIG_PACKAGE_wpad-basic-wolfssl=n
-CONFIG_PACKAGE_wpad-openssl=y
-CONFIG_PACKAGE_matter-netman=y
-CONFIG_PACKAGE_mdnsresponder=y
-CONFIG_PACKAGE_openthread-br=y
+CONFIG_MBEDTLS_CCM_C=y
+CONFIG_PACKAGE_matter-netman-mbedtls=m
+CONFIG_PACKAGE_matter-netman-openssl=m
+CONFIG_PACKAGE_mdnsresponder=m
+CONFIG_PACKAGE_openthread-br=m

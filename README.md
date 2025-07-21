@@ -33,10 +33,12 @@ $ ./scripts/feeds install -a -p matter
 For a minimal configuration, overwrite the `.config` file with the following lines and then run `make defconfig`:
 
 ```
-CONFIG_PACKAGE_matter-netman=y
+CONFIG_PACKAGE_matter-netman-mbedtls=y
+CONFIG_MBEDTLS_CCM_C=y
 ```
 
-Note that since the Matter SDK is currently configured to build using OpenSSL, it is recommended to also use OpenSSL as the TLS backend for hostapd / wpad.
+Note that this requires the mbedtls package from the OpenWrt core to be rebuilt with the MBEDTLS_CCM_C option enabled.
+Alternatively, the matter-netman-openssl variant of the package can be used which depends on OpenSSL.
 
 ## License
 
