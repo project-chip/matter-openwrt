@@ -20,9 +20,7 @@ USE_PROCD=1
 PROG=/usr/sbin/matter-network-manager-app
 
 start_service() {
-	mkdir -p /etc/matter
-	chown matter:matter /etc/matter
-	chmod 0700 /etc/matter
+	. /usr/share/matter/bootstrap.sh
 
 	procd_open_instance
 	procd_set_param command "$PROG"
