@@ -12,5 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-include ../overlay.mk
+include ../../include/overlay.mk
 $(eval $(call BuildPackageOverlay,network/services/hostapd))
