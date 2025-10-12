@@ -1,5 +1,5 @@
+#  Copyright (c) 2024-2025 Project CHIP Authors
 #  Copyright (c) 2020, The OpenThread Authors.
-#  Copyright (c) 2024 Project CHIP Authors
 #
 #  All rights reserved.
 #
@@ -31,12 +31,12 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=openthread-br
 PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
-PKG_SOURCE_PROTO:=git
+PKG_SOURCE_PROTO:=git-with-metadata
 PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 
-PKG_SOURCE_DATE:=2025-07-18
-PKG_SOURCE_VERSION:=4576f30af33f9b9060a343818723065918091362
-PKG_MIRROR_HASH:=df5d71fa22e05878b0c39d991d63d86714d8ba827a7564edbea99979004d9685
+PKG_SOURCE_DATE:=2025-10-29
+PKG_SOURCE_VERSION:=07fc9adf2afd6f697a92c54db922f575c7bcd28f
+PKG_MIRROR_HASH:=cc62bc395897122e5b45e7d956c8488758dba3be4ed5b728b7cbf5bfc8caaf07
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE
@@ -45,13 +45,19 @@ PKG_CONFIG_DEPENDS:=CONFIG_DEBUG CONFIG_OPENTHREADBR_SHARED_MBEDTLS
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
+include ../../include/git-with-metadata.mk
+
+define GitWithMetadata/gather
+echo -n OTBR_GIT_VERSION= && git describe --dirty --always && \
+echo -n OT_GIT_VERSION= && git -C third_party/openthread/repo describe --dirty --always
+endef
 
 define Package/openthread-br/Default
   SECTION:=net
   CATEGORY:=Network
   TITLE:=OpenThread Border Router
   URL:=https://github.com/openthread/ot-br-posix
-  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libblobmsg-json +kmod-usb-acm +kmod-tun
+  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libubox +kmod-usb-acm +kmod-tun
 endef
 
 define Package/openthread-br/Default/description
@@ -64,7 +70,7 @@ endef
 define Package/openthread-br
   $(call Package/openthread-br/Default)
   VARIANT:=default
-  DEPENDS+= +libdnssd
+  DEPENDS+= +PACKAGE_openthread-br:libdnssd
 endef
 
 define Package/openthread-br/description
@@ -91,7 +97,7 @@ define Package/openthread-br-avahi
   VARIANT:=avahi
   PROVIDES:=openthread-br
   CONFLICTS:=openthread-br
-  DEPENDS+= +libavahi-client
+  DEPENDS+= +PACKAGE_openthread-br-avahi:libavahi-client
 endef
 
 define Package/openthread-br-avahi/description
@@ -111,9 +117,10 @@ define Package/openthread-br-luci/description
 LuCI user interface for the OpenThread Border Router.
 endef
 
-
 # Disable firewall integration due to https://github.com/openthread/ot-br-posix/issues/1675
 CMAKE_OPTIONS+= \
+	-DOTBR_GIT_VERSION=$(call GitWithMetadata/resolve,OTBR_GIT_VERSION) \
+	-DOT_PACKAGE_VERSION=$(call GitWithMetadata/resolve,OT_GIT_VERSION) \
 	-DCMAKE_BUILD_TYPE=$(if $(CONFIG_DEBUG),Debug,Release) \
 	-DCMAKE_INSTALL_PREFIX=/usr \
 	-DBUILD_TESTING=OFF \
@@ -134,11 +141,7 @@ TARGET_CFLAGS+= \
 	-DOPENTHREAD_CONFIG_LOG_PREPEND_LEVEL=0
 
 ifneq ($(CONFIG_OPENTHREADBR_SHARED_MBEDTLS),)
-CMAKE_OPTIONS+= \
-	-DOT_EXTERNAL_MBEDTLS="mbedtls;mbedcrypto;mbedx509" \
-	-DOT_BUILTIN_MBEDTLS_MANAGEMENT=ON
-# MBEDTLS_SSL_EXPORT_KEYS is no longer defined (due to no longer being optional) in mbedTLS >= 3.1.0
-TARGET_CFLAGS+= -DMBEDTLS_SSL_EXPORT_KEYS
+CMAKE_OPTIONS+= -DOTBR_EXTERNAL_MBEDTLS="mbedtls;mbedcrypto;mbedx509"
 endif
 
 ifeq ($(BUILD_VARIANT),avahi)

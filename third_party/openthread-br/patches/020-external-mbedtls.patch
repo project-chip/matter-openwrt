@@ -1,0 +1,106 @@
+commit 865059d9875bac8e22fd64d5e506c0dd5c3ba886
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Fri Oct 10 22:29:18 2025 +1300
+
+    Add OTBR_EXTERNAL_MBEDTLS build setting
+    
+    This works the same as (and propagates to OT_EXTERNAL_MBEDTLS).
+
+diff --git a/etc/cmake/options.cmake b/etc/cmake/options.cmake
+index 13874415d1..29af2827a7 100644
+--- a/etc/cmake/options.cmake
++++ b/etc/cmake/options.cmake
+@@ -39,6 +39,13 @@ elseif (OTBR_MDNS STREQUAL "openthread")
+     target_compile_definitions(otbr-config INTERFACE OTBR_ENABLE_MDNS_OPENTHREAD=1)
+ endif()
+ 
++set(OTBR_EXTERNAL_MBEDTLS "" CACHE STRING "Specify external mbedtls library")
++if(NOT OTBR_EXTERNAL_MBEDTLS)
++    set(OTBR_MBEDTLS mbedtls) # from third_party/openthread
++else()
++    set(OTBR_MBEDTLS ${OTBR_EXTERNAL_MBEDTLS})
++endif()
++
+ option(OTBR_BORDER_AGENT "Enable Border Agent" ON)
+ if (OTBR_BORDER_AGENT)
+     target_compile_definitions(otbr-config INTERFACE OTBR_ENABLE_BORDER_AGENT=1)
+diff --git a/src/utils/CMakeLists.txt b/src/utils/CMakeLists.txt
+index 26d51e4866..07a4cdbb41 100644
+--- a/src/utils/CMakeLists.txt
++++ b/src/utils/CMakeLists.txt
+@@ -42,5 +42,5 @@ add_library(otbr-utils
+ 
+ target_link_libraries(otbr-utils PUBLIC
+     otbr-common
+-    mbedtls
++    ${OTBR_MBEDTLS}
+ )
+diff --git a/src/web/CMakeLists.txt b/src/web/CMakeLists.txt
+index 217341ba23..270e28a15f 100644
+--- a/src/web/CMakeLists.txt
++++ b/src/web/CMakeLists.txt
+@@ -50,7 +50,7 @@ target_link_libraries(otbr-web PRIVATE
+     otbr-utils
+     openthread-ftd
+     openthread-posix
+-    mbedtls
++    ${OTBR_MBEDTLS}
+     pthread
+ )
+ install(
+diff --git a/tests/gtest/CMakeLists.txt b/tests/gtest/CMakeLists.txt
+index 2974cf52d9..79e559d363 100644
+--- a/tests/gtest/CMakeLists.txt
++++ b/tests/gtest/CMakeLists.txt
+@@ -47,7 +47,7 @@ add_executable(otbr-gtest-unit
+     test_task_runner.cpp
+ )
+ target_link_libraries(otbr-gtest-unit
+-    mbedtls
++    ${OTBR_MBEDTLS}
+     otbr-common
+     otbr-host
+     otbr-utils
+@@ -132,7 +132,7 @@ target_include_directories(otbr-gtest-host-api
+         ${OPENTHREAD_PROJECT_DIRECTORY}/tests/gtest
+ )
+ target_link_libraries(otbr-gtest-host-api
+-    mbedtls
++    ${OTBR_MBEDTLS}
+     otbr-common
+     otbr-utils
+     otbr-posix
+diff --git a/third_party/openthread/CMakeLists.txt b/third_party/openthread/CMakeLists.txt
+index 50dc5728c3..c95b7ab438 100644
+--- a/third_party/openthread/CMakeLists.txt
++++ b/third_party/openthread/CMakeLists.txt
+@@ -51,6 +51,7 @@ set(OT_DNS_CLIENT_OVER_TCP OFF CACHE STRING "disable DNS query over TCP")
+ set(OT_DNS_UPSTREAM_QUERY ${OTBR_DNS_UPSTREAM_QUERY} CACHE STRING "enable sending DNS queries to upstream" FORCE)
+ set(OT_ECDSA ON CACHE STRING "enable ECDSA" FORCE)
+ set(OT_EXTERNAL_HEAP ON CACHE STRING "enable external heap" FORCE)
++set(OT_EXTERNAL_MBEDTLS ${OTBR_EXTERNAL_MBEDTLS} CACHE STRING "Specify external mbedtls library" FORCE)
+ set(OT_FIREWALL ON CACHE STRING "enable firewall feature")
+ set(OT_HISTORY_TRACKER ON CACHE STRING "enable history tracker" FORCE)
+ set(OT_JOINER ON CACHE STRING "enable joiner" FORCE)
+diff --git a/tools/CMakeLists.txt b/tools/CMakeLists.txt
+index 5e8451afdb..7df5c6905d 100644
+--- a/tools/CMakeLists.txt
++++ b/tools/CMakeLists.txt
+@@ -33,7 +33,7 @@ target_link_libraries(pskc PRIVATE
+     otbr-config
+     otbr-common
+     otbr-utils
+-    mbedtls
++    ${OTBR_MBEDTLS}
+ )
+ 
+ add_executable(steering-data
+@@ -43,7 +43,7 @@ target_link_libraries(steering-data PRIVATE
+     otbr-config
+     otbr-common
+     otbr-utils
+-    mbedtls
++    ${OTBR_MBEDTLS}
+ )
+ 
+ if ($ENV{REFERENCE_DEVICE})
