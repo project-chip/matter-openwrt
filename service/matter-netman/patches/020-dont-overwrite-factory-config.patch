@@ -1,0 +1,122 @@
+commit e6307a048248556109e6c054cc72f99a67914ac4
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Thu Oct 16 14:35:23 2025 +1300
+
+    Linux PosixConfig: Don't commit factory storage changes to disk
+    
+    The factory namespace would ideally be entirely read-only, but there are some
+    code paths that write default values there. Keep these in memory only instead
+    of writing to disk.
+
+diff --git a/src/platform/Linux/PosixConfig.cpp b/src/platform/Linux/PosixConfig.cpp
+index 052203a312..7b69e3575c 100644
+--- a/src/platform/Linux/PosixConfig.cpp
++++ b/src/platform/Linux/PosixConfig.cpp
+@@ -272,9 +272,14 @@ CHIP_ERROR PosixConfig::WriteConfigValue(Key key, bool val)
+     err = storage->WriteValue(key.Name, val);
+     SuccessOrExit(err);
+ 
+-    // Commit the value to the persistent store.
+-    err = storage->Commit();
+-    SuccessOrExit(err);
++    // Commit the value to the persistent store, unless it's in the factory namespace.
++    // Technically the factory namespace should not be written to at all, but there
++    // are some code paths that write default values into it at startup.
++    if (storage != &gChipLinuxFactoryStorage)
++    {
++        err = storage->Commit();
++        SuccessOrExit(err);
++    }
+ 
+     ChipLogProgress(DeviceLayer, "NVS set: %s/%s = %s", StringOrNullMarker(key.Namespace), StringOrNullMarker(key.Name),
+                     val ? "true" : "false");
+@@ -294,9 +299,11 @@ CHIP_ERROR PosixConfig::WriteConfigValue(Key key, uint16_t val)
+     err = storage->WriteValue(key.Name, val);
+     SuccessOrExit(err);
+ 
+-    // Commit the value to the persistent store.
+-    err = storage->Commit();
+-    SuccessOrExit(err);
++    if (storage != &gChipLinuxFactoryStorage)
++    {
++        err = storage->Commit();
++        SuccessOrExit(err);
++    }
+ 
+     ChipLogProgress(DeviceLayer, "NVS set: %s/%s = %u (0x%X)", StringOrNullMarker(key.Namespace), StringOrNullMarker(key.Name), val,
+                     val);
+@@ -316,9 +323,11 @@ CHIP_ERROR PosixConfig::WriteConfigValue(Key key, uint32_t val)
+     err = storage->WriteValue(key.Name, val);
+     SuccessOrExit(err);
+ 
+-    // Commit the value to the persistent store.
+-    err = storage->Commit();
+-    SuccessOrExit(err);
++    if (storage != &gChipLinuxFactoryStorage)
++    {
++        err = storage->Commit();
++        SuccessOrExit(err);
++    }
+ 
+     ChipLogProgress(DeviceLayer, "NVS set: %s/%s = %" PRIu32 " (0x%" PRIX32 ")", StringOrNullMarker(key.Namespace),
+                     StringOrNullMarker(key.Name), val, val);
+@@ -338,9 +347,11 @@ CHIP_ERROR PosixConfig::WriteConfigValue(Key key, uint64_t val)
+     err = storage->WriteValue(key.Name, val);
+     SuccessOrExit(err);
+ 
+-    // Commit the value to the persistent store.
+-    err = storage->Commit();
+-    SuccessOrExit(err);
++    if (storage != &gChipLinuxFactoryStorage)
++    {
++        err = storage->Commit();
++        SuccessOrExit(err);
++    }
+ 
+     ChipLogProgress(DeviceLayer, "NVS set: %s/%s = %" PRIu64 " (0x%" PRIX64 ")", StringOrNullMarker(key.Namespace),
+                     StringOrNullMarker(key.Name), val, val);
+@@ -362,9 +373,11 @@ CHIP_ERROR PosixConfig::WriteConfigValueStr(Key key, const char * str)
+         err = storage->WriteValueStr(key.Name, str);
+         SuccessOrExit(err);
+ 
+-        // Commit the value to the persistent store.
+-        err = storage->Commit();
+-        SuccessOrExit(err);
++        if (storage != &gChipLinuxFactoryStorage)
++        {
++            err = storage->Commit();
++            SuccessOrExit(err);
++        }
+ 
+         ChipLogProgress(DeviceLayer, "NVS set: %s/%s = \"%s\"", StringOrNullMarker(key.Namespace), StringOrNullMarker(key.Name),
+                         str);
+@@ -418,9 +431,11 @@ CHIP_ERROR PosixConfig::WriteConfigValueBin(Key key, const uint8_t * data, size_
+         err = storage->WriteValueBin(key.Name, data, dataLen);
+         SuccessOrExit(err);
+ 
+-        // Commit the value to the persistent store.
+-        err = storage->Commit();
+-        SuccessOrExit(err);
++        if (storage != &gChipLinuxFactoryStorage)
++        {
++            err = storage->Commit();
++            SuccessOrExit(err);
++        }
+ 
+         ChipLogProgress(DeviceLayer, "NVS set: %s/%s = (blob length %u)", StringOrNullMarker(key.Namespace),
+                         StringOrNullMarker(key.Name), static_cast<unsigned int>(dataLen));
+@@ -450,9 +465,11 @@ CHIP_ERROR PosixConfig::ClearConfigValue(Key key)
+     }
+     SuccessOrExit(err);
+ 
+-    // Commit the value to the persistent store.
+-    err = storage->Commit();
+-    SuccessOrExit(err);
++    if (storage != &gChipLinuxFactoryStorage)
++    {
++        err = storage->Commit();
++        SuccessOrExit(err);
++    }
+ 
+     ChipLogProgress(DeviceLayer, "NVS erase: %s/%s", StringOrNullMarker(key.Namespace), StringOrNullMarker(key.Name));
+ 

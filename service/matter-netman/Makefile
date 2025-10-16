@@ -26,9 +26,9 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2025-07-08
-PKG_SOURCE_VERSION:=dda2252eb28440305c883d0204737dce5b3abe62
-PKG_MIRROR_HASH:=ad81137221dafc0302c70cb90a03ab2472a02ee3c03e8cef8edcba26fd34201d
+PKG_SOURCE_DATE:=2025-10-29
+PKG_SOURCE_VERSION:=8f221d80d3f78d63ff4ad3d2d363e702430b5df7
+PKG_MIRROR_HASH:=eb565be9381ce88369b063d5ba25855218b657e366b3258c74e4cc41956c08b2
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
@@ -50,7 +50,7 @@ define Package/matter-netman/default
   CATEGORY:=Network
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
-  DEPENDS:=+libstdcpp +libatomic
+  DEPENDS:=+libstdcpp +libatomic +libubus +libubox
   USERID:=matter:matter
 endef
 
@@ -90,10 +90,10 @@ endef
 
 # General options
 CONFIGURE_OPTIONS:=\
+	--enable-ubus \
+	--enable-detail-logging \
 	--enable-recommended=no \
 	--enable-access-restrictions=no \
-	--enable-wifi=no \
-	--enable-openthread=no \
 	--enable-network-layer-ble=no \
 	--enable-tracing-support=no
 
@@ -124,9 +124,10 @@ OS_VERSION:=$(if $(filter-out SNAPSHOT,$(VERSION_NUMBER)),$(VERSION_NUMBER)-)$(V
 TARGET_CFLAGS+=\
 	-DCHIP_DEVICE_CONFIG_ENABLE_TEST_SETUP_PARAMS=0 \
 	-DCHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING=\"$(PKG_VERSION)@$(OS_VERSION)\" \
-	-DCHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION_STRING=\"\" \
+	-DCHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION_STRING=\"-\" \
 	-DCHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME=\"$(VERSION_DIST)\" \
-	-DCHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME=\"\"
+	-DCHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME=\"\" \
+	-DCHIP_DEVICE_CONFIG_TEST_SERIAL_NUMBER=\"\"
 
 # https://github.com/openwrt/openwrt/issues/13016
 TARGET_CFLAGS+= -Wno-format-nonliteral
@@ -149,9 +150,10 @@ define Build/Compile
 endef
 
 define Package/matter-netman/default/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d
 	$(INSTALL_BIN) $(OUT_DIR)/matter-network-manager-app $(1)/usr/sbin
 	$(INSTALL_DATA) ./files/bootstrap.sh $(1)/usr/share/matter/
+	$(INSTALL_DATA) ./files/matter_acl.json $(1)/usr/share/acl.d
 	$(INSTALL_BIN) ./files/matter.init $(1)/etc/init.d/matter
 endef
 
