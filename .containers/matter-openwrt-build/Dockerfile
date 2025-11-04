@@ -1,4 +1,4 @@
-ARG OPENWRT_VERSION=24.10.2
+ARG OPENWRT_VERSION=24.10.4
 FROM ghcr.io/openwrt/sdk:x86-generic-${OPENWRT_VERSION}
 LABEL org.opencontainers.image.description="Pre-warmed OpenWrt SDK"
 
