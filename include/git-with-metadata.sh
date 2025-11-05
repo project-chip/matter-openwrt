@@ -19,7 +19,7 @@
 GWM_IN_HOOK=
 GWM_META="$(mktemp -t gwm-meta.XXXXXX)"
 
-git() { command git "$@" && [ -n "$GWM_IN_HOOK" ] || gwm_hook git "$@"; }
+git() { command git "$@" && { [ -n "$GWM_IN_HOOK" ] || gwm_hook git "$@"; }; }
 true() { [ -n "$GWM_IN_HOOK" ] || gwm_hook true "$@"; }
 
 gwm_gather() {
