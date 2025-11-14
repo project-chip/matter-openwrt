@@ -1,0 +1,32 @@
+commit 0257ed3ce1bf32639134e3a485e3c1e74a4f4606
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Fri Oct 10 22:49:53 2025 +1300
+
+    Allow OTBR_GIT_VERSION to be supplied externally
+    
+    This is useful when building from an archive instead of directly out of a git
+    working copy, but where the git commit metadata is available externally.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f4acff5da2..6cebd976b7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -68,11 +68,13 @@ endif()
+ message(STATUS "OTBR package name: ${OTBR_NAME}")
+ 
+ if(NOT OTBR_VERSION)
+-    execute_process(
+-        COMMAND git describe --dirty --always
+-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+-        OUTPUT_VARIABLE OTBR_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE
+-    )
++    if(NOT OTBR_GIT_VERSION)
++        execute_process(
++            COMMAND git describe --dirty --always
++            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
++            OUTPUT_VARIABLE OTBR_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE
++        )
++    endif()
+ 
+     if(OTBR_GIT_VERSION)
+         set(OTBR_VERSION "${PROJECT_VERSION}-${OTBR_GIT_VERSION}")

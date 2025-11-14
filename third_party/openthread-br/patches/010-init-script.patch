@@ -1,9 +1,17 @@
+commit a36f28e4618013c0c942169eaf6b097f1a0721d6
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Fri Oct 10 13:29:43 2025 +1300
+
+    OpenWrt init script: Make uart-flow-control configurable
+    
+    Also tidy up the way the configuration is handled.
+
 diff --git a/etc/openwrt/openthread-br/README.md b/etc/openwrt/openthread-br/README.md
-index a4f918035c..af4b604e29 100644
+index a99d5bf643..6d03772b25 100644
 --- a/etc/openwrt/openthread-br/README.md
 +++ b/etc/openwrt/openthread-br/README.md
 @@ -65,7 +65,7 @@ Start otbr-agent manually:
- /usr/sbin/otbr-agent -I wpan0 'spinel+hdlc+uart:///dev/ttyACM0?uart-baudrate=115200'
+ /usr/sbin/otbr-agent -I wpan0 'spinel+hdlc+uart:///dev/ttyACM0?uart-baudrate=460800'
  ```
  
 -Edit the service file `/etc/init.d/otbr-agent` if RCP device is not `/dev/ttyACM0` and then start with:
@@ -11,7 +19,7 @@ index a4f918035c..af4b604e29 100644
  
  ```bash
  service otbr-agent start
-@@ -80,7 +80,7 @@ If you need to change the thread network interface (`wpan0` by default), you need
+@@ -80,7 +80,7 @@ If you need to change the thread network interface (`wpan0` by default), you nee
  ```bash
  service otbr-firewall stop
  service otbr-agent stop
@@ -48,7 +56,7 @@ index 8237f38b42..52f90306a9 100644
          DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/init.d
          RENAME otbr-firewall)
 diff --git a/src/openwrt/otbr-agent.init.in b/src/openwrt/otbr-agent.init.in
-index 46505ff434..e942234fb9 100755
+index 46505ff434..43f1999cd6 100755
 --- a/src/openwrt/otbr-agent.init.in
 +++ b/src/openwrt/otbr-agent.init.in
 @@ -30,15 +30,46 @@
@@ -105,7 +113,7 @@ index 46505ff434..e942234fb9 100755
 +    config_foreach validate_section_otbr otbr-agent otbr_instance
 +}
 diff --git a/src/openwrt/otbr-agent.uci-config.in b/src/openwrt/otbr-agent.uci-config.in
-index 855d708852..d80d91b5ff 100644
+index eb18eda2a3..252ee18df9 100644
 --- a/src/openwrt/otbr-agent.uci-config.in
 +++ b/src/openwrt/otbr-agent.uci-config.in
 @@ -1,5 +1,5 @@

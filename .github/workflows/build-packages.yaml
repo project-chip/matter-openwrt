@@ -17,7 +17,7 @@ jobs:
       - name: Build
         uses: addnab/docker-run-action@v3
         with:
-          image: ghcr.io/project-chip/matter-openwrt-build:24.10.2
+          image: ghcr.io/project-chip/matter-openwrt-build:24.10.4
           options: --volume ${{ github.workspace }}:/workspace
           shell: bash
           run: |

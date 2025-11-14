@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-OVERLAY_MK:=$(abspath $(lastword $(MAKEFILE_LIST)))
-OVERLAY_SH:=$(dir $(OVERLAY_MK))overlay.sh
+OVERLAY_SH:=$(patsubst %.mk,%.sh,$(abspath $(lastword $(MAKEFILE_LIST))))
 
 define BuildPackageOverlay
   $(call BuildPackageOverlay/$(if $(DUMP),Dump,Build),$(notdir $(1)),$(call overlay_base,$(1)))

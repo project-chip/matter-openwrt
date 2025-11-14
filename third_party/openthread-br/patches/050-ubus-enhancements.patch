@@ -1,0 +1,3777 @@
+diff --git a/src/agent/application.cpp b/src/agent/application.cpp
+index ff541bb7b9..8328df888d 100644
+--- a/src/agent/application.cpp
++++ b/src/agent/application.cpp
+@@ -91,6 +91,11 @@ Application::Application(Host::ThreadHost  &aHost,
+ 
+ void Application::Init(const std::string &aRestListenAddress, int aRestListenPort)
+ {
++    // Set up signal handlers before initializing other components.
++    signal(SIGTERM, HandleSignal); // allow quitting elegantly
++    signal(SIGINT, HandleSignal);  // ... also on SIGINT
++    signal(SIGPIPE, SIG_IGN);      // avoid exiting on SIGPIPE
++
+     mHost.Init();
+ 
+     switch (mHost.GetCoprocessorType())
+@@ -157,12 +162,6 @@ otbrError Application::Run(void)
+     }
+ #endif
+ 
+-    // allow quitting elegantly
+-    signal(SIGTERM, HandleSignal);
+-
+-    // avoid exiting on SIGPIPE
+-    signal(SIGPIPE, SIG_IGN);
+-
+     while (!sShouldTerminate)
+     {
+         otbr::MainloopContext mainloop;
+diff --git a/src/openwrt/ubus/CMakeLists.txt b/src/openwrt/ubus/CMakeLists.txt
+index 9d0a086e60..8e868f2b01 100644
+--- a/src/openwrt/ubus/CMakeLists.txt
++++ b/src/openwrt/ubus/CMakeLists.txt
+@@ -35,6 +35,4 @@ target_link_libraries(otbr-ubus PRIVATE
+     openthread-posix
+     ubox
+     ubus
+-    blobmsg_json
+-    json-c
+ )
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 45b9ed4e52..e67f762ac8 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -1,5 +1,5 @@
+ /*
+- *  Copyright (c) 2019, The OpenThread Authors.
++ *  Copyright (c) 2019-2025, The OpenThread Authors.
+  *  All rights reserved.
+  *
+  *  Redistribution and use in source and binary forms, with or without
+@@ -26,797 +26,265 @@
+  *  POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-#if __ORDER_BIG_ENDIAN__
+-#define BYTE_ORDER_BIG_ENDIAN 1
+-#endif
+-
+ #define OTBR_LOG_TAG "UBUS"
+ 
+ #include "openwrt/ubus/otubus.hpp"
+ 
+-#include <mutex>
+-
+-#include <arpa/inet.h>
+-#include <sys/eventfd.h>
++#include <functional>
++#include <type_traits>
+ 
+ #include <openthread/commissioner.h>
++#include <openthread/netdiag.h>
+ #include <openthread/thread.h>
+ #include <openthread/thread_ftd.h>
+ 
+ #include "common/logging.hpp"
++#include "common/time.hpp"
+ #include "host/rcp_host.hpp"
+ 
++using std::placeholders::_1;
++
+ namespace otbr {
+ namespace ubus {
+ 
+-static UbusServer *sUbusServerInstance = nullptr;
+-static int         sUbusEfd            = -1;
+-static void       *sJsonUri            = nullptr;
+-static int         sBufNum;
++static constexpr uint32_t kDefaultJoinerTimeout = 120;
+ 
+-const static int PANID_LENGTH      = 10;
+-const static int XPANID_LENGTH     = 64;
+-const static int NETWORKKEY_LENGTH = 64;
++static otError ParseLong(char *aString, long &aLong);
++static int     Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength);
+ 
+-UbusServer::UbusServer(Host::RcpHost *aHost, std::mutex *aMutex)
+-    : mIfFinishScan(false)
+-    , mContext(nullptr)
+-    , mSockPath(nullptr)
+-    , mHost(aHost)
+-    , mHostMutex(aMutex)
+-    , mSecond(0)
++static char const *DeviceRoleToString(otDeviceRole aRole)
+ {
+-    memset(&mNetworkdataBuf, 0, sizeof(mNetworkdataBuf));
+-    memset(&mBuf, 0, sizeof(mBuf));
++    const char *string = "invalid";
++    switch (aRole)
++    {
++    case OT_DEVICE_ROLE_DISABLED:
++        string = "disabled";
++        break;
+ 
+-    blob_buf_init(&mBuf, 0);
+-    blob_buf_init(&mNetworkdataBuf, 0);
++    case OT_DEVICE_ROLE_DETACHED:
++        string = "detached";
++        break;
++
++    case OT_DEVICE_ROLE_CHILD:
++        string = "child";
++        break;
++
++    case OT_DEVICE_ROLE_ROUTER:
++        string = "router";
++        break;
++
++    case OT_DEVICE_ROLE_LEADER:
++        string = "leader";
++        break;
++    }
++    return string;
+ }
+ 
+-UbusServer &UbusServer::GetInstance(void)
++static bool IsAttached(otDeviceRole aRole)
+ {
+-    return *sUbusServerInstance;
++    switch (aRole)
++    {
++    case OT_DEVICE_ROLE_CHILD:
++    case OT_DEVICE_ROLE_ROUTER:
++    case OT_DEVICE_ROLE_LEADER:
++        return true;
++    default:
++        return false;
++    }
+ }
+ 
+-void UbusServer::Initialize(Host::RcpHost *aHost, std::mutex *aMutex)
++static int blobmsg_add_hex_string(blob_buf *aBuf, const char *aName, const uint8_t *aData, unsigned int aLength)
+ {
+-    sUbusServerInstance = new UbusServer(aHost, aMutex);
++    char *hex = static_cast<char *>(blobmsg_alloc_string_buffer(aBuf, aName, aLength * 2 + 1));
++    VerifyOrReturn(hex != nullptr, -1);
++
++    for (unsigned int i = 0; i < aLength; i++)
++    {
++        sprintf(&hex[i * 2], "%02x", aData[i]);
++    }
++    blobmsg_add_string_buffer(aBuf);
++    return 0;
+ }
+ 
+-enum
+-{
+-    SETNETWORK,
+-    SET_NETWORK_MAX,
+-};
++// === UbusServer ===
+ 
+-enum
++UbusServer::UbusServer(ubus_context &aContext, Host::RcpHost &aHost)
++    : mContext(aContext)
++    , mHost(aHost)
+ {
+-    PSKD,
+-    EUI64,
+-    ADD_JOINER_MAX,
+-};
++    Object().name      = "otbr";
++    Object().type      = &sObjectType;
++    Object().methods   = sObjectType.methods;
++    Object().n_methods = sObjectType.n_methods;
++    blob_buf_init(&mNetworkdataBuf, 0);
++}
+ 
+-enum
++void UbusServer::Init()
+ {
+-    NETWORKKEY,
+-    NETWORKNAME,
+-    EXTPANID,
+-    PANID,
+-    CHANNEL,
+-    PSKC,
+-    MGMTSET_MAX,
+-};
+-
+-static const struct blobmsg_policy setNetworknamePolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "networkname", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy setPanIdPolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "panid", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy setExtPanIdPolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "extpanid", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy setChannelPolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "channel", .type = BLOBMSG_TYPE_INT32},
+-};
+-
+-static const struct blobmsg_policy setPskcPolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "pskc", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy setNetworkkeyPolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "networkkey", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy setModePolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "mode", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy macfilterAddPolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "addr", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy macfilterRemovePolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "addr", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy macfilterSetStatePolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "state", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy removeJoinerPolicy[SET_NETWORK_MAX] = {
+-    [SETNETWORK] = {.name = "eui64", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy addJoinerPolicy[ADD_JOINER_MAX] = {
+-    [PSKD]  = {.name = "pskd", .type = BLOBMSG_TYPE_STRING},
+-    [EUI64] = {.name = "eui64", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct blobmsg_policy mgmtsetPolicy[MGMTSET_MAX] = {
+-    [NETWORKKEY]  = {.name = "networkkey", .type = BLOBMSG_TYPE_STRING},
+-    [NETWORKNAME] = {.name = "networkname", .type = BLOBMSG_TYPE_STRING},
+-    [EXTPANID]    = {.name = "extpanid", .type = BLOBMSG_TYPE_STRING},
+-    [PANID]       = {.name = "panid", .type = BLOBMSG_TYPE_STRING},
+-    [CHANNEL]     = {.name = "channel", .type = BLOBMSG_TYPE_STRING},
+-    [PSKC]        = {.name = "pskc", .type = BLOBMSG_TYPE_STRING},
+-};
+-
+-static const struct ubus_method otbrMethods[] = {
+-    {"scan", &UbusServer::UbusScanHandler, 0, 0, nullptr, 0},
+-    {"channel", &UbusServer::UbusChannelHandler, 0, 0, nullptr, 0},
+-    {"setchannel", &UbusServer::UbusSetChannelHandler, 0, 0, setChannelPolicy, ARRAY_SIZE(setChannelPolicy)},
+-    {"networkname", &UbusServer::UbusNetworknameHandler, 0, 0, nullptr, 0},
+-    {"setnetworkname", &UbusServer::UbusSetNetworknameHandler, 0, 0, setNetworknamePolicy,
+-     ARRAY_SIZE(setNetworknamePolicy)},
+-    {"state", &UbusServer::UbusStateHandler, 0, 0, nullptr, 0},
+-    {"panid", &UbusServer::UbusPanIdHandler, 0, 0, nullptr, 0},
+-    {"setpanid", &UbusServer::UbusSetPanIdHandler, 0, 0, setPanIdPolicy, ARRAY_SIZE(setPanIdPolicy)},
+-    {"rloc16", &UbusServer::UbusRloc16Handler, 0, 0, nullptr, 0},
+-    {"extpanid", &UbusServer::UbusExtPanIdHandler, 0, 0, nullptr, 0},
+-    {"setextpanid", &UbusServer::UbusSetExtPanIdHandler, 0, 0, setExtPanIdPolicy, ARRAY_SIZE(setExtPanIdPolicy)},
+-    {"networkkey", &UbusServer::UbusNetworkkeyHandler, 0, 0, nullptr, 0},
+-    {"setnetworkkey", &UbusServer::UbusSetNetworkkeyHandler, 0, 0, setNetworkkeyPolicy,
+-     ARRAY_SIZE(setNetworkkeyPolicy)},
+-    {"pskc", &UbusServer::UbusPskcHandler, 0, 0, nullptr, 0},
+-    {"setpskc", &UbusServer::UbusSetPskcHandler, 0, 0, setPskcPolicy, ARRAY_SIZE(setPskcPolicy)},
+-    {"threadstart", &UbusServer::UbusThreadStartHandler, 0, 0, nullptr, 0},
+-    {"threadstop", &UbusServer::UbusThreadStopHandler, 0, 0, nullptr, 0},
+-    {"neighbor", &UbusServer::UbusNeighborHandler, 0, 0, nullptr, 0},
+-    {"parent", &UbusServer::UbusParentHandler, 0, 0, nullptr, 0},
+-    {"mode", &UbusServer::UbusModeHandler, 0, 0, nullptr, 0},
+-    {"setmode", &UbusServer::UbusSetModeHandler, 0, 0, setModePolicy, ARRAY_SIZE(setModePolicy)},
+-    {"partitionid", &UbusServer::UbusPartitionIdHandler, 0, 0, nullptr, 0},
+-    {"leave", &UbusServer::UbusLeaveHandler, 0, 0, nullptr, 0},
+-    {"leaderdata", &UbusServer::UbusLeaderdataHandler, 0, 0, nullptr, 0},
+-    {"networkdata", &UbusServer::UbusNetworkdataHandler, 0, 0, nullptr, 0},
+-    {"commissionerstart", &UbusServer::UbusCommissionerStartHandler, 0, 0, nullptr, 0},
+-    {"joinernum", &UbusServer::UbusJoinerNumHandler, 0, 0, nullptr, 0},
+-    {"joinerremove", &UbusServer::UbusJoinerRemoveHandler, 0, 0, nullptr, 0},
+-    {"macfiltersetstate", &UbusServer::UbusMacfilterSetStateHandler, 0, 0, macfilterSetStatePolicy,
+-     ARRAY_SIZE(macfilterSetStatePolicy)},
+-    {"macfilteradd", &UbusServer::UbusMacfilterAddHandler, 0, 0, macfilterAddPolicy, ARRAY_SIZE(macfilterAddPolicy)},
+-    {"macfilterremove", &UbusServer::UbusMacfilterRemoveHandler, 0, 0, macfilterRemovePolicy,
+-     ARRAY_SIZE(macfilterRemovePolicy)},
+-    {"macfilterclear", &UbusServer::UbusMacfilterClearHandler, 0, 0, nullptr, 0},
+-    {"macfilterstate", &UbusServer::UbusMacfilterStateHandler, 0, 0, nullptr, 0},
+-    {"macfilteraddr", &UbusServer::UbusMacfilterAddrHandler, 0, 0, nullptr, 0},
+-    {"joineradd", &UbusServer::UbusJoinerAddHandler, 0, 0, addJoinerPolicy, ARRAY_SIZE(addJoinerPolicy)},
+-    {"mgmtset", &UbusServer::UbusMgmtsetHandler, 0, 0, mgmtsetPolicy, ARRAY_SIZE(mgmtsetPolicy)},
+-    {"interfacename", &UbusServer::UbusInterfaceNameHandler, 0, 0, nullptr, 0},
+-};
+-
+-static struct ubus_object_type otbrObjType = {"otbr_prog", 0, otbrMethods, ARRAY_SIZE(otbrMethods)};
+-
+-static struct ubus_object otbr = {
+-    avl : {},
+-    name : "otbr",
+-    id : 0,
+-    path : nullptr,
+-    type : &otbrObjType,
+-    subscribe_cb : nullptr,
+-    has_subscribers : false,
+-    methods : otbrMethods,
+-    n_methods : ARRAY_SIZE(otbrMethods),
+-};
++    if (ubus_add_object(&mContext, &Object()) != 0)
++    {
++        otbrLogErr("Failed to publish object");
++        ExitNow();
++    }
+ 
+-void UbusServer::ProcessScan(void)
+-{
+-    otError  error        = OT_ERROR_NONE;
+-    uint32_t scanChannels = 0;
+-    uint16_t scanDuration = 0;
++    mHost.GetThreadHelper()->AddDeviceRoleHandler(std::bind(&UbusServer::HandleDeviceRoleChanged, this, _1));
++    mHost.GetThreadHelper()->AddActiveDatasetChangeHandler(
++        std::bind(&UbusServer::HandleActiveDatasetChanged, this, _1));
+ 
+-    mHostMutex->lock();
+-    SuccessOrExit(error = otLinkActiveScan(mHost->GetInstance(), scanChannels, scanDuration,
+-                                           &UbusServer::HandleActiveScanResult, this));
+ exit:
+-    mHostMutex->unlock();
+     return;
+ }
+ 
+-void UbusServer::HandleActiveScanResult(otActiveScanResult *aResult, void *aContext)
++UbusServer &UbusServer::PrepareInvoke(ubus_object *aObj, ubus_request_data *aRequest, const char *aMethod)
+ {
+-    static_cast<UbusServer *>(aContext)->HandleActiveScanResultDetail(aResult);
++    auto *self = static_cast<UbusServer *>(aObj);
++    otbrLogDebug("Handling %s.%s from %08x (%s)", aObj->name, aMethod, aRequest->peer, aRequest->acl.user);
++    blob_buf_init(&self->mBuf, 0);
++    return *self;
+ }
+ 
+-void UbusServer::OutputBytes(const uint8_t *aBytes, uint8_t aLength, char *aOutput)
++void UbusServer::HandleActiveScanResult(otActiveScanResult *aResult, void *aContext)
+ {
+-    char byte2char[5] = "";
+-    for (int i = 0; i < aLength; i++)
+-    {
+-        sprintf(byte2char, "%02x", aBytes[i]);
+-        strcat(aOutput, byte2char);
+-    }
++    static_cast<UbusServer *>(aContext)->HandleActiveScanResultDetail(aResult);
+ }
+ 
+-void UbusServer::AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest)
++void UbusServer::SendInvokeResponse(ubus_request_data *aRequest, blob_buf *aBuf, otError aError)
+ {
+-    blobmsg_add_u16(&mBuf, "Error", aError);
+-    ubus_send_reply(aContext, aRequest, mBuf.head);
++    blobmsg_add_u16(aBuf, "Error", aError);
++    ubus_send_reply(&mContext, aRequest, aBuf->head);
+ }
+ 
+ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+ {
+     void *jsonList = nullptr;
+ 
+-    char panidstring[PANID_LENGTH];
+-    char xpanidstring[XPANID_LENGTH] = "";
+-
+     if (aResult == nullptr)
+     {
+-        blobmsg_close_array(&mBuf, sJsonUri);
+-        mIfFinishScan = true;
++        blobmsg_close_array(&mScanBuf, mScanArray);
++        SendInvokeResponse(&mScanRequest, &mScanBuf, OT_ERROR_NONE);
++        ubus_complete_deferred_request(&mContext, &mScanRequest, 0);
+         goto exit;
+     }
+ 
+-    jsonList = blobmsg_open_table(&mBuf, nullptr);
+-
+-    blobmsg_add_string(&mBuf, "NetworkName", aResult->mNetworkName.m8);
+-
+-    OutputBytes(aResult->mExtendedPanId.m8, OT_EXT_PAN_ID_SIZE, xpanidstring);
+-    blobmsg_add_string(&mBuf, "ExtendedPanId", xpanidstring);
+-
+-    sprintf(panidstring, "0x%04x", aResult->mPanId);
+-    blobmsg_add_string(&mBuf, "PanId", panidstring);
+-
+-    blobmsg_add_u32(&mBuf, "Channel", aResult->mChannel);
++    jsonList = blobmsg_open_table(&mScanBuf, nullptr);
+ 
+-    blobmsg_add_u32(&mBuf, "Rssi", aResult->mRssi);
++    blobmsg_add_string(&mScanBuf, "NetworkName", aResult->mNetworkName.m8);
++    blobmsg_add_hex_string(&mScanBuf, "ExtendedPanId", aResult->mExtendedPanId.m8, OT_EXT_PAN_ID_SIZE);
++    blobmsg_printf(&mScanBuf, "PanId", "0x%04x", aResult->mPanId);
++    blobmsg_add_u32(&mScanBuf, "Channel", aResult->mChannel);
++    blobmsg_add_u32(&mScanBuf, "Rssi", aResult->mRssi);
++    blobmsg_add_u32(&mScanBuf, "Lqi", aResult->mLqi);
+ 
+-    blobmsg_add_u32(&mBuf, "Lqi", aResult->mLqi);
+-
+-    blobmsg_close_table(&mBuf, jsonList);
++    blobmsg_close_table(&mScanBuf, jsonList);
+ 
+ exit:
+     return;
+ }
+ 
+-int UbusServer::UbusScanHandler(struct ubus_context      *aContext,
+-                                struct ubus_object       *aObj,
+-                                struct ubus_request_data *aRequest,
+-                                const char               *aMethod,
+-                                struct blob_attr         *aMsg)
++int UbusServer::HandleScan(ubus_request_data *aRequest)
+ {
+-    return GetInstance().UbusScanHandlerDetail(aContext, aObj, aRequest, aMethod, aMsg);
+-}
+-
+-int UbusServer::UbusScanHandlerDetail(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg)
+-{
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
+-
+-    otError  error = OT_ERROR_NONE;
+-    uint64_t eventNum;
+-    ssize_t  retval;
+-
+-    blob_buf_init(&mBuf, 0);
+-    sJsonUri = blobmsg_open_array(&mBuf, "scan_list");
++    otError  error;
++    uint32_t scanChannels = 0;
++    uint16_t scanDuration = 0;
+ 
+-    mIfFinishScan = 0;
+-    sUbusServerInstance->ProcessScan();
++    SuccessOrExit(error = otLinkActiveScan(mHost.GetInstance(), scanChannels, scanDuration,
++                                           &UbusServer::HandleActiveScanResult, this));
+ 
+-    eventNum = 1;
+-    retval   = write(sUbusEfd, &eventNum, sizeof(uint64_t));
+-    if (retval != sizeof(uint64_t))
+-    {
+-        error = OT_ERROR_FAILED;
+-        goto exit;
+-    }
++    ubus_defer_request(&mContext, aRequest, &mScanRequest);
++    blob_buf_init(&mScanBuf, 0);
++    mScanArray = blobmsg_open_array(&mScanBuf, "scan_list");
+ 
+-    while (!mIfFinishScan)
++exit:
++    if (error != OT_ERROR_NONE)
+     {
+-        sleep(1);
++        SendInvokeResponse(aRequest, &mBuf, error);
+     }
+-
+-exit:
+-    AppendResult(error, aContext, aRequest);
+     return 0;
+ }
+ 
+-int UbusServer::UbusChannelHandler(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "channel");
+-}
+-
+-int UbusServer::UbusSetChannelHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "channel");
+-}
+-
+-int UbusServer::UbusJoinerNumHandler(struct ubus_context      *aContext,
+-                                     struct ubus_object       *aObj,
+-                                     struct ubus_request_data *aRequest,
+-                                     const char               *aMethod,
+-                                     struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "joinernum");
+-}
+-
+-int UbusServer::UbusNetworknameHandler(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "networkname");
+-}
+-
+-int UbusServer::UbusSetNetworknameHandler(struct ubus_context      *aContext,
+-                                          struct ubus_object       *aObj,
+-                                          struct ubus_request_data *aRequest,
+-                                          const char               *aMethod,
+-                                          struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "networkname");
+-}
+-
+-int UbusServer::UbusStateHandler(struct ubus_context      *aContext,
+-                                 struct ubus_object       *aObj,
+-                                 struct ubus_request_data *aRequest,
+-                                 const char               *aMethod,
+-                                 struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "state");
+-}
+-
+-int UbusServer::UbusRloc16Handler(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "rloc16");
+-}
+-
+-int UbusServer::UbusPanIdHandler(struct ubus_context      *aContext,
+-                                 struct ubus_object       *aObj,
+-                                 struct ubus_request_data *aRequest,
+-                                 const char               *aMethod,
+-                                 struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "panid");
+-}
+-
+-int UbusServer::UbusSetPanIdHandler(struct ubus_context      *aContext,
+-                                    struct ubus_object       *aObj,
+-                                    struct ubus_request_data *aRequest,
+-                                    const char               *aMethod,
+-                                    struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "panid");
+-}
+-
+-int UbusServer::UbusExtPanIdHandler(struct ubus_context      *aContext,
+-                                    struct ubus_object       *aObj,
+-                                    struct ubus_request_data *aRequest,
+-                                    const char               *aMethod,
+-                                    struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "extpanid");
+-}
+-
+-int UbusServer::UbusSetExtPanIdHandler(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "extpanid");
+-}
+-
+-int UbusServer::UbusPskcHandler(struct ubus_context      *aContext,
+-                                struct ubus_object       *aObj,
+-                                struct ubus_request_data *aRequest,
+-                                const char               *aMethod,
+-                                struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "pskc");
+-}
+-
+-int UbusServer::UbusSetPskcHandler(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "pskc");
+-}
+-
+-int UbusServer::UbusNetworkkeyHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "networkkey");
+-}
+-
+-int UbusServer::UbusSetNetworkkeyHandler(struct ubus_context      *aContext,
+-                                         struct ubus_object       *aObj,
+-                                         struct ubus_request_data *aRequest,
+-                                         const char               *aMethod,
+-                                         struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "networkkey");
+-}
+-
+-int UbusServer::UbusThreadStartHandler(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusThreadHandler(aContext, aObj, aRequest, aMethod, aMsg, "start");
+-}
+-
+-int UbusServer::UbusThreadStopHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusThreadHandler(aContext, aObj, aRequest, aMethod, aMsg, "stop");
+-}
+-
+-int UbusServer::UbusParentHandler(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusParentHandlerDetail(aContext, aObj, aRequest, aMethod, aMsg);
+-}
+-
+-int UbusServer::UbusNeighborHandler(struct ubus_context      *aContext,
+-                                    struct ubus_object       *aObj,
+-                                    struct ubus_request_data *aRequest,
+-                                    const char               *aMethod,
+-                                    struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusNeighborHandlerDetail(aContext, aObj, aRequest, aMethod, aMsg);
+-}
+-
+-int UbusServer::UbusModeHandler(struct ubus_context      *aContext,
+-                                struct ubus_object       *aObj,
+-                                struct ubus_request_data *aRequest,
+-                                const char               *aMethod,
+-                                struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "mode");
+-}
+-
+-int UbusServer::UbusSetModeHandler(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "mode");
+-}
+-
+-int UbusServer::UbusPartitionIdHandler(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "partitionid");
+-}
+-
+-int UbusServer::UbusLeaveHandler(struct ubus_context      *aContext,
+-                                 struct ubus_object       *aObj,
+-                                 struct ubus_request_data *aRequest,
+-                                 const char               *aMethod,
+-                                 struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusLeaveHandlerDetail(aContext, aObj, aRequest, aMethod, aMsg);
+-}
+-
+-int UbusServer::UbusLeaderdataHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "leaderdata");
+-}
+-
+-int UbusServer::UbusNetworkdataHandler(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "networkdata");
+-}
+-
+-int UbusServer::UbusCommissionerStartHandler(struct ubus_context      *aContext,
+-                                             struct ubus_object       *aObj,
+-                                             struct ubus_request_data *aRequest,
+-                                             const char               *aMethod,
+-                                             struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusCommissioner(aContext, aObj, aRequest, aMethod, aMsg, "start");
+-}
+-
+-int UbusServer::UbusJoinerRemoveHandler(struct ubus_context      *aContext,
+-                                        struct ubus_object       *aObj,
+-                                        struct ubus_request_data *aRequest,
+-                                        const char               *aMethod,
+-                                        struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusCommissioner(aContext, aObj, aRequest, aMethod, aMsg, "joinerremove");
+-}
+-
+-int UbusServer::UbusMgmtsetHandler(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusMgmtset(aContext, aObj, aRequest, aMethod, aMsg);
+-}
+-
+-int UbusServer::UbusInterfaceNameHandler(struct ubus_context      *aContext,
+-                                         struct ubus_object       *aObj,
+-                                         struct ubus_request_data *aRequest,
+-                                         const char               *aMethod,
+-                                         struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "interfacename");
+-}
+-
+-int UbusServer::UbusJoinerAddHandler(struct ubus_context      *aContext,
+-                                     struct ubus_object       *aObj,
+-                                     struct ubus_request_data *aRequest,
+-                                     const char               *aMethod,
+-                                     struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusCommissioner(aContext, aObj, aRequest, aMethod, aMsg, "joineradd");
+-}
+-
+-int UbusServer::UbusMacfilterAddrHandler(struct ubus_context      *aContext,
+-                                         struct ubus_object       *aObj,
+-                                         struct ubus_request_data *aRequest,
+-                                         const char               *aMethod,
+-                                         struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "macfilteraddr");
+-}
+-
+-int UbusServer::UbusMacfilterStateHandler(struct ubus_context      *aContext,
+-                                          struct ubus_object       *aObj,
+-                                          struct ubus_request_data *aRequest,
+-                                          const char               *aMethod,
+-                                          struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusGetInformation(aContext, aObj, aRequest, aMethod, aMsg, "macfilterstate");
+-}
+-
+-int UbusServer::UbusMacfilterAddHandler(struct ubus_context      *aContext,
+-                                        struct ubus_object       *aObj,
+-                                        struct ubus_request_data *aRequest,
+-                                        const char               *aMethod,
+-                                        struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "macfilteradd");
+-}
+-
+-int UbusServer::UbusMacfilterRemoveHandler(struct ubus_context      *aContext,
+-                                           struct ubus_object       *aObj,
+-                                           struct ubus_request_data *aRequest,
+-                                           const char               *aMethod,
+-                                           struct blob_attr         *aMsg)
++int UbusServer::HandleLeave(ubus_request_data *aRequest)
+ {
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "macfilterremove");
+-}
++    ubus_request_data request;
+ 
+-int UbusServer::UbusMacfilterSetStateHandler(struct ubus_context      *aContext,
+-                                             struct ubus_object       *aObj,
+-                                             struct ubus_request_data *aRequest,
+-                                             const char               *aMethod,
+-                                             struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "macfiltersetstate");
+-}
++    // Complete the request immediately because otInstanceFactoryReset() won't return
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    ubus_defer_request(&mContext, aRequest, &request);
++    ubus_complete_deferred_request(&mContext, &request, 0);
+ 
+-int UbusServer::UbusMacfilterClearHandler(struct ubus_context      *aContext,
+-                                          struct ubus_object       *aObj,
+-                                          struct ubus_request_data *aRequest,
+-                                          const char               *aMethod,
+-                                          struct blob_attr         *aMsg)
+-{
+-    return GetInstance().UbusSetInformation(aContext, aObj, aRequest, aMethod, aMsg, "macfilterclear");
++    otInstanceFactoryReset(mHost.GetInstance());
++    return 0;
+ }
+ 
+-int UbusServer::UbusLeaveHandlerDetail(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg)
++int UbusServer::HandleThreadStart(ubus_request_data *aRequest)
+ {
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
+-
+-    otError  error = OT_ERROR_NONE;
+-    uint64_t eventNum;
+-    ssize_t  retval;
+-
+-    mHostMutex->lock();
+-    otInstanceFactoryReset(mHost->GetInstance());
+-
+-    eventNum = 1;
+-    retval   = write(sUbusEfd, &eventNum, sizeof(uint64_t));
+-    if (retval != sizeof(uint64_t))
+-    {
+-        error = OT_ERROR_FAILED;
+-        goto exit;
+-    }
++    otError error = OT_ERROR_NONE;
+ 
+-    blob_buf_init(&mBuf, 0);
++    SuccessOrExit(error = otIp6SetEnabled(mHost.GetInstance(), true));
++    SuccessOrExit(error = otThreadSetEnabled(mHost.GetInstance(), true));
+ 
+ exit:
+-    mHostMutex->unlock();
+-    AppendResult(error, aContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+-int UbusServer::UbusThreadHandler(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg,
+-                                  const char               *aAction)
+-{
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
+ 
++int UbusServer::HandleThreadStop(ubus_request_data *aRequest)
++{
+     otError error = OT_ERROR_NONE;
+ 
+-    blob_buf_init(&mBuf, 0);
+-
+-    if (!strcmp(aAction, "start"))
+-    {
+-        mHostMutex->lock();
+-        SuccessOrExit(error = otIp6SetEnabled(mHost->GetInstance(), true));
+-        SuccessOrExit(error = otThreadSetEnabled(mHost->GetInstance(), true));
+-    }
+-    else if (!strcmp(aAction, "stop"))
+-    {
+-        mHostMutex->lock();
+-        SuccessOrExit(error = otThreadSetEnabled(mHost->GetInstance(), false));
+-        SuccessOrExit(error = otIp6SetEnabled(mHost->GetInstance(), false));
+-    }
++    SuccessOrExit(error = otThreadSetEnabled(mHost.GetInstance(), false));
++    SuccessOrExit(error = otIp6SetEnabled(mHost.GetInstance(), false));
+ 
+ exit:
+-    mHostMutex->unlock();
+-    AppendResult(error, aContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+-int UbusServer::UbusParentHandlerDetail(struct ubus_context      *aContext,
+-                                        struct ubus_object       *aObj,
+-                                        struct ubus_request_data *aRequest,
+-                                        const char               *aMethod,
+-                                        struct blob_attr         *aMsg)
++int UbusServer::HandleParent(ubus_request_data *aRequest)
+ {
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
+-
+     otError      error = OT_ERROR_NONE;
+     otRouterInfo parentInfo;
+-    char         extAddress[XPANID_LENGTH] = "";
+-    char         transfer[XPANID_LENGTH]   = "";
+-    void        *jsonList                  = nullptr;
+-    void        *jsonArray                 = nullptr;
+-
+-    blob_buf_init(&mBuf, 0);
++    void        *jsonList  = nullptr;
++    void        *jsonArray = nullptr;
+ 
+-    mHostMutex->lock();
+-    SuccessOrExit(error = otThreadGetParentInfo(mHost->GetInstance(), &parentInfo));
++    SuccessOrExit(error = otThreadGetParentInfo(mHost.GetInstance(), &parentInfo));
+ 
+     jsonArray = blobmsg_open_array(&mBuf, "parent_list");
+     jsonList  = blobmsg_open_table(&mBuf, "parent");
+-    blobmsg_add_string(&mBuf, "Role", "R");
+-
+-    sprintf(transfer, "0x%04x", parentInfo.mRloc16);
+-    blobmsg_add_string(&mBuf, "Rloc16", transfer);
+-
+-    sprintf(transfer, "%3d", parentInfo.mAge);
+-    blobmsg_add_string(&mBuf, "Age", transfer);
+-
+-    OutputBytes(parentInfo.mExtAddress.m8, sizeof(parentInfo.mExtAddress.m8), extAddress);
+-    blobmsg_add_string(&mBuf, "ExtAddress", extAddress);
+ 
++    blobmsg_add_string(&mBuf, "Role", "R");
++    blobmsg_printf(&mBuf, "Rloc16", "0x%04x", parentInfo.mRloc16);
++    blobmsg_printf(&mBuf, "Age", "%3d", parentInfo.mAge);
++    blobmsg_add_hex_string(&mBuf, "ExtAddress", parentInfo.mExtAddress.m8, sizeof(parentInfo.mExtAddress.m8));
+     blobmsg_add_u16(&mBuf, "LinkQualityIn", parentInfo.mLinkQualityIn);
+ 
+     blobmsg_close_table(&mBuf, jsonList);
+     blobmsg_close_array(&mBuf, jsonArray);
+ 
+ exit:
+-    mHostMutex->unlock();
+-    AppendResult(error, aContext, aRequest);
+-    return error;
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
+ }
+ 
+-int UbusServer::UbusNeighborHandlerDetail(struct ubus_context      *aContext,
+-                                          struct ubus_object       *aObj,
+-                                          struct ubus_request_data *aRequest,
+-                                          const char               *aMethod,
+-                                          struct blob_attr         *aMsg)
++int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+ {
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
+-
+     otError                error = OT_ERROR_NONE;
+     otNeighborInfo         neighborInfo;
+-    otNeighborInfoIterator iterator                  = OT_NEIGHBOR_INFO_ITERATOR_INIT;
+-    char                   transfer[XPANID_LENGTH]   = "";
+-    void                  *jsonList                  = nullptr;
+-    char                   mode[5]                   = "";
+-    char                   extAddress[XPANID_LENGTH] = "";
+-
+-    blob_buf_init(&mBuf, 0);
++    otNeighborInfoIterator iterator  = OT_NEIGHBOR_INFO_ITERATOR_INIT;
++    void                  *jsonList  = nullptr;
++    void                  *jsonTable = nullptr;
++    char                   mode[5]   = "";
+ 
+-    sJsonUri = blobmsg_open_array(&mBuf, "neighbor_list");
++    jsonList = blobmsg_open_array(&mBuf, "neighbor_list");
+ 
+-    mHostMutex->lock();
+-    while (otThreadGetNextNeighborInfo(mHost->GetInstance(), &iterator, &neighborInfo) == OT_ERROR_NONE)
++    while (otThreadGetNextNeighborInfo(mHost.GetInstance(), &iterator, &neighborInfo) == OT_ERROR_NONE)
+     {
+-        jsonList = blobmsg_open_table(&mBuf, nullptr);
++        jsonTable = blobmsg_open_table(&mBuf, nullptr);
+ 
+         blobmsg_add_string(&mBuf, "Role", neighborInfo.mIsChild ? "C" : "R");
+-
+-        sprintf(transfer, "0x%04x", neighborInfo.mRloc16);
+-        blobmsg_add_string(&mBuf, "Rloc16", transfer);
+-
+-        sprintf(transfer, "%3d", neighborInfo.mAge);
+-        blobmsg_add_string(&mBuf, "Age", transfer);
+-
+-        sprintf(transfer, "%8d", neighborInfo.mAverageRssi);
+-        blobmsg_add_string(&mBuf, "AvgRssi", transfer);
+-
+-        sprintf(transfer, "%9d", neighborInfo.mLastRssi);
+-        blobmsg_add_string(&mBuf, "LastRssi", transfer);
++        blobmsg_printf(&mBuf, "Rloc16", "0x%04x", neighborInfo.mRloc16);
++        blobmsg_printf(&mBuf, "Age", "%3d", neighborInfo.mAge);
++        blobmsg_printf(&mBuf, "AvgRssi", "%8d", neighborInfo.mAverageRssi);
++        blobmsg_printf(&mBuf, "LastRssi", "%9d", neighborInfo.mLastRssi);
+ 
+         if (neighborInfo.mRxOnWhenIdle)
+         {
+@@ -833,46 +301,48 @@ int UbusServer::UbusNeighborHandlerDetail(struct ubus_context      *aContext,
+             strcat(mode, "n");
+         }
+         blobmsg_add_string(&mBuf, "Mode", mode);
+-
+-        OutputBytes(neighborInfo.mExtAddress.m8, sizeof(neighborInfo.mExtAddress.m8), extAddress);
+-        blobmsg_add_string(&mBuf, "ExtAddress", extAddress);
+-
++        blobmsg_add_hex_string(&mBuf, "ExtAddress", neighborInfo.mExtAddress.m8, sizeof(neighborInfo.mExtAddress.m8));
+         blobmsg_add_u16(&mBuf, "LinkQualityIn", neighborInfo.mLinkQualityIn);
+ 
+-        blobmsg_close_table(&mBuf, jsonList);
++        blobmsg_close_table(&mBuf, jsonTable);
+ 
+         memset(mode, 0, sizeof(mode));
+-        memset(extAddress, 0, sizeof(extAddress));
+     }
+ 
+-    blobmsg_close_array(&mBuf, sJsonUri);
+-
+-    mHostMutex->unlock();
+-
+-    AppendResult(error, aContext, aRequest);
++    blobmsg_close_array(&mBuf, jsonList);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+-int UbusServer::UbusMgmtset(struct ubus_context      *aContext,
+-                            struct ubus_object       *aObj,
+-                            struct ubus_request_data *aRequest,
+-                            const char               *aMethod,
+-                            struct blob_attr         *aMsg)
++enum
+ {
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
++    NETWORKKEY,
++    NETWORKNAME,
++    EXTPANID,
++    PANID,
++    CHANNEL,
++    PSKC,
++};
++
++static constexpr blobmsg_policy kMgmtSetPolicy[] = {
++    [NETWORKKEY]  = {.name = "networkkey", .type = BLOBMSG_TYPE_STRING},
++    [NETWORKNAME] = {.name = "networkname", .type = BLOBMSG_TYPE_STRING},
++    [EXTPANID]    = {.name = "extpanid", .type = BLOBMSG_TYPE_STRING},
++    [PANID]       = {.name = "panid", .type = BLOBMSG_TYPE_STRING},
++    [CHANNEL]     = {.name = "channel", .type = BLOBMSG_TYPE_STRING},
++    [PSKC]        = {.name = "pskc", .type = BLOBMSG_TYPE_STRING},
++};
+ 
++int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
++{
+     otError              error = OT_ERROR_NONE;
+-    struct blob_attr    *tb[MGMTSET_MAX];
+     otOperationalDataset dataset;
+     uint8_t              tlvs[128];
+     long                 value;
+     int                  length = 0;
+ 
+-    SuccessOrExit(error = otDatasetGetActive(mHost->GetInstance(), &dataset));
++    SuccessOrExit(error = otDatasetGetActive(mHost.GetInstance(), &dataset));
+ 
+-    blobmsg_parse(mgmtsetPolicy, MGMTSET_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+     if (tb[NETWORKKEY] != nullptr)
+     {
+         dataset.mComponents.mIsNetworkKeyPresent = true;
+@@ -883,12 +353,12 @@ int UbusServer::UbusMgmtset(struct ubus_context      *aContext,
+     }
+     if (tb[NETWORKNAME] != nullptr)
+     {
++        const char *networkname                   = blobmsg_get_string(tb[NETWORKNAME]);
+         dataset.mComponents.mIsNetworkNamePresent = true;
+-        VerifyOrExit((length = static_cast<int>(strlen(blobmsg_get_string(tb[NETWORKNAME])))) <=
+-                         OT_NETWORK_NAME_MAX_SIZE,
++        VerifyOrExit((length = static_cast<int>(strlen(networkname))) <= OT_NETWORK_NAME_MAX_SIZE,
+                      error = OT_ERROR_PARSE);
+         memset(&dataset.mNetworkName, 0, sizeof(dataset.mNetworkName));
+-        memcpy(dataset.mNetworkName.m8, blobmsg_get_string(tb[NETWORKNAME]), static_cast<size_t>(length));
++        memcpy(dataset.mNetworkName.m8, networkname, static_cast<size_t>(length));
+         length = 0;
+     }
+     if (tb[EXTPANID] != nullptr)
+@@ -919,100 +389,103 @@ int UbusServer::UbusMgmtset(struct ubus_context      *aContext,
+         length = 0;
+     }
+     dataset.mActiveTimestamp.mSeconds++;
+-    if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
++    if (otCommissionerGetState(mHost.GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
+     {
+-        otCommissionerStop(mHost->GetInstance());
++        otCommissionerStop(mHost.GetInstance());
+     }
+-    SuccessOrExit(error = otDatasetSendMgmtActiveSet(mHost->GetInstance(), &dataset, tlvs, static_cast<uint8_t>(length),
++    SuccessOrExit(error = otDatasetSendMgmtActiveSet(mHost.GetInstance(), &dataset, tlvs, static_cast<uint8_t>(length),
+                                                      /* aCallback */ nullptr,
+                                                      /* aContext */ nullptr));
+ exit:
+-    AppendResult(error, aContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+-int UbusServer::UbusCommissioner(struct ubus_context      *aContext,
+-                                 struct ubus_object       *aObj,
+-                                 struct ubus_request_data *aRequest,
+-                                 const char               *aMethod,
+-                                 struct blob_attr         *aMsg,
+-                                 const char               *aAction)
++int UbusServer::HandleCommissionerStart(ubus_request_data *aRequest)
+ {
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
+-
+     otError error = OT_ERROR_NONE;
+ 
+-    mHostMutex->lock();
++    if (otCommissionerGetState(mHost.GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
++    {
++        error = otCommissionerStart(mHost.GetInstance(), &UbusServer::HandleStateChanged,
++                                    &UbusServer::HandleJoinerEvent, this);
++    }
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
++
++enum
++{
++    PSKD,
++    EUI64,
++};
++
++static constexpr blobmsg_policy kJoinerAddPolicy[] = {
++    [PSKD]  = {.name = "pskd", .type = BLOBMSG_TYPE_STRING},
++    [EUI64] = {.name = "eui64", .type = BLOBMSG_TYPE_STRING},
++};
++
++int UbusServer::HandleJoinerAdd(ubus_request_data *aRequest, blob_attr *(&tb)[2])
++{
++    otError             error = OT_ERROR_NONE;
++    otExtAddress        addr;
++    const otExtAddress *addrPtr = nullptr;
++    char               *pskd    = nullptr;
+ 
+-    if (!strcmp(aAction, "start"))
++    if (tb[PSKD] != nullptr)
+     {
+-        if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
+-        {
+-            error = otCommissionerStart(mHost->GetInstance(), &UbusServer::HandleStateChanged,
+-                                        &UbusServer::HandleJoinerEvent, this);
+-        }
++        pskd = blobmsg_get_string(tb[PSKD]);
+     }
+-    else if (!strcmp(aAction, "joineradd"))
++    if (tb[EUI64] != nullptr)
+     {
+-        struct blob_attr   *tb[ADD_JOINER_MAX];
+-        otExtAddress        addr;
+-        const otExtAddress *addrPtr = nullptr;
+-        char               *pskd    = nullptr;
+-
+-        blobmsg_parse(addJoinerPolicy, ADD_JOINER_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[PSKD] != nullptr)
++        const char *eui64 = blobmsg_get_string(tb[EUI64]);
++        if (!strcmp(eui64, "*"))
+         {
+-            pskd = blobmsg_get_string(tb[PSKD]);
++            addrPtr = nullptr;
++            memset(&addr, 0, sizeof(addr));
+         }
+-        if (tb[EUI64] != nullptr)
++        else
+         {
+-            if (!strcmp(blobmsg_get_string(tb[EUI64]), "*"))
+-            {
+-                addrPtr = nullptr;
+-                memset(&addr, 0, sizeof(addr));
+-            }
+-            else
+-            {
+-                VerifyOrExit(Hex2Bin(blobmsg_get_string(tb[EUI64]), addr.m8, sizeof(addr)) == sizeof(addr),
+-                             error = OT_ERROR_PARSE);
+-                addrPtr = &addr;
+-            }
++            VerifyOrExit(Hex2Bin(eui64, addr.m8, sizeof(addr)) == sizeof(addr), error = OT_ERROR_PARSE);
++            addrPtr = &addr;
+         }
+-
+-        unsigned long timeout = kDefaultJoinerTimeout;
+-        SuccessOrExit(error =
+-                          otCommissionerAddJoiner(mHost->GetInstance(), addrPtr, pskd, static_cast<uint32_t>(timeout)));
+     }
+-    else if (!strcmp(aAction, "joinerremove"))
+-    {
+-        struct blob_attr   *tb[SET_NETWORK_MAX];
+-        otExtAddress        addr;
+-        const otExtAddress *addrPtr = nullptr;
+ 
+-        blobmsg_parse(removeJoinerPolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
++    SuccessOrExit(error = otCommissionerAddJoiner(mHost.GetInstance(), addrPtr, pskd, kDefaultJoinerTimeout));
++
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
++
++static constexpr blobmsg_policy kJoinerRemovePolicy[] = {
++    [0] = {.name = "eui64", .type = BLOBMSG_TYPE_STRING},
++};
++
++int UbusServer::HandleJoinerRemove(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError             error = OT_ERROR_NONE;
++    otExtAddress        addr;
++    const otExtAddress *addrPtr = nullptr;
++
++    if (aArgs[0] != nullptr)
++    {
++        const char *eui64 = blobmsg_get_string(aArgs[0]);
++        if (strcmp(eui64, "*") == 0)
+         {
+-            if (strcmp(blobmsg_get_string(tb[SETNETWORK]), "*") == 0)
+-            {
+-                addrPtr = nullptr;
+-            }
+-            else
+-            {
+-                VerifyOrExit(Hex2Bin(blobmsg_get_string(tb[SETNETWORK]), addr.m8, sizeof(addr)) == sizeof(addr),
+-                             error = OT_ERROR_PARSE);
+-                addrPtr = &addr;
+-            }
++            addrPtr = nullptr;
++        }
++        else
++        {
++            VerifyOrExit(Hex2Bin(eui64, addr.m8, sizeof(addr)) == sizeof(addr), error = OT_ERROR_PARSE);
++            addrPtr = &addr;
+         }
+-
+-        SuccessOrExit(error = otCommissionerRemoveJoiner(mHost->GetInstance(), addrPtr));
+     }
+ 
++    SuccessOrExit(error = otCommissionerRemoveJoiner(mHost.GetInstance(), addrPtr));
++
+ exit:
+-    mHostMutex->unlock();
+-    blob_buf_init(&mBuf, 0);
+-    AppendResult(error, aContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -1072,238 +545,245 @@ void UbusServer::HandleJoinerEvent(otCommissionerJoinerEvent aEvent,
+     }
+ }
+ 
+-int UbusServer::UbusGetInformation(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg,
+-                                   const char               *aAction)
++int UbusServer::HandleNetworkName(ubus_request_data *aRequest)
+ {
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
++    blobmsg_add_string(&mBuf, "NetworkName", otThreadGetNetworkName(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-    otError error = OT_ERROR_NONE;
++int UbusServer::HandleInterfaceName(ubus_request_data *aRequest)
++{
++    blobmsg_add_string(&mBuf, "InterfaceName", mHost.GetInterfaceName());
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-    blob_buf_init(&mBuf, 0);
++int UbusServer::HandleState(ubus_request_data *aRequest)
++{
++    blobmsg_add_string(&mBuf, "State", DeviceRoleToString(otThreadGetDeviceRole(mHost.GetInstance())));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-    mHostMutex->lock();
+-    if (!strcmp(aAction, "networkname"))
+-        blobmsg_add_string(&mBuf, "NetworkName", otThreadGetNetworkName(mHost->GetInstance()));
+-    else if (!strcmp(aAction, "interfacename"))
+-    {
+-        blobmsg_add_string(&mBuf, "InterfaceName", mHost->GetInterfaceName());
+-    }
+-    else if (!strcmp(aAction, "state"))
+-    {
+-        char state[10];
+-        GetState(mHost->GetInstance(), state);
+-        blobmsg_add_string(&mBuf, "State", state);
+-    }
+-    else if (!strcmp(aAction, "channel"))
+-        blobmsg_add_u32(&mBuf, "Channel", otLinkGetChannel(mHost->GetInstance()));
+-    else if (!strcmp(aAction, "panid"))
+-    {
+-        char panIdString[PANID_LENGTH];
+-        sprintf(panIdString, "0x%04x", otLinkGetPanId(mHost->GetInstance()));
+-        blobmsg_add_string(&mBuf, "PanId", panIdString);
+-    }
+-    else if (!strcmp(aAction, "rloc16"))
+-    {
+-        char rloc[PANID_LENGTH];
+-        sprintf(rloc, "0x%04x", otThreadGetRloc16(mHost->GetInstance()));
+-        blobmsg_add_string(&mBuf, "rloc16", rloc);
+-    }
+-    else if (!strcmp(aAction, "networkkey"))
+-    {
+-        char         outputKey[NETWORKKEY_LENGTH] = "";
+-        otNetworkKey key;
++int UbusServer::HandleChannel(ubus_request_data *aRequest)
++{
++    blobmsg_add_u32(&mBuf, "Channel", otLinkGetChannel(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        otThreadGetNetworkKey(mHost->GetInstance(), &key);
+-        OutputBytes(key.m8, OT_NETWORK_KEY_SIZE, outputKey);
+-        blobmsg_add_string(&mBuf, "Networkkey", outputKey);
+-    }
+-    else if (!strcmp(aAction, "pskc"))
+-    {
+-        char   outputPskc[NETWORKKEY_LENGTH] = "";
+-        otPskc pskc;
++int UbusServer::HandlePanId(ubus_request_data *aRequest)
++{
++    blobmsg_printf(&mBuf, "PanId", "0x%04x", otLinkGetPanId(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        otThreadGetPskc(mHost->GetInstance(), &pskc);
+-        OutputBytes(pskc.m8, OT_PSKC_MAX_SIZE, outputPskc);
+-        blobmsg_add_string(&mBuf, "pskc", outputPskc);
+-    }
+-    else if (!strcmp(aAction, "extpanid"))
+-    {
+-        char           outputExtPanId[XPANID_LENGTH] = "";
+-        const uint8_t *extPanId = reinterpret_cast<const uint8_t *>(otThreadGetExtendedPanId(mHost->GetInstance()));
+-        OutputBytes(extPanId, OT_EXT_PAN_ID_SIZE, outputExtPanId);
+-        blobmsg_add_string(&mBuf, "ExtPanId", outputExtPanId);
+-    }
+-    else if (!strcmp(aAction, "mode"))
+-    {
+-        otLinkModeConfig linkMode;
+-        char             mode[5] = "";
++int UbusServer::HandleRloc16(ubus_request_data *aRequest)
++{
++    blobmsg_printf(&mBuf, "rloc16", "0x%04x", otThreadGetRloc16(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        memset(&linkMode, 0, sizeof(otLinkModeConfig));
++int UbusServer::HandleNetworkKey(ubus_request_data *aRequest)
++{
++    otNetworkKey key;
+ 
+-        linkMode = otThreadGetLinkMode(mHost->GetInstance());
++    otThreadGetNetworkKey(mHost.GetInstance(), &key);
++    blobmsg_add_hex_string(&mBuf, "Networkkey", key.m8, OT_NETWORK_KEY_SIZE);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        if (linkMode.mRxOnWhenIdle)
+-        {
+-            strcat(mode, "r");
+-        }
++int UbusServer::HandlePskc(ubus_request_data *aRequest)
++{
++    otPskc pskc;
+ 
+-        if (linkMode.mDeviceType)
+-        {
+-            strcat(mode, "d");
+-        }
++    otThreadGetPskc(mHost.GetInstance(), &pskc);
++    blobmsg_add_hex_string(&mBuf, "pskc", pskc.m8, OT_PSKC_MAX_SIZE);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        if (linkMode.mNetworkData)
+-        {
+-            strcat(mode, "n");
+-        }
+-        blobmsg_add_string(&mBuf, "Mode", mode);
++int UbusServer::HandleExtPanId(ubus_request_data *aRequest)
++{
++    const uint8_t *extPanId = reinterpret_cast<const uint8_t *>(otThreadGetExtendedPanId(mHost.GetInstance()));
++    blobmsg_add_hex_string(&mBuf, "ExtPanId", extPanId, OT_EXT_PAN_ID_SIZE);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
++
++int UbusServer::HandleMode(ubus_request_data *aRequest)
++{
++    otLinkModeConfig linkMode;
++    char             mode[5] = "";
++
++    memset(&linkMode, 0, sizeof(otLinkModeConfig));
++
++    linkMode = otThreadGetLinkMode(mHost.GetInstance());
++
++    if (linkMode.mRxOnWhenIdle)
++    {
++        strcat(mode, "r");
+     }
+-    else if (!strcmp(aAction, "partitionid"))
++
++    if (linkMode.mDeviceType)
+     {
+-        blobmsg_add_u32(&mBuf, "Partitionid", otThreadGetPartitionId(mHost->GetInstance()));
++        strcat(mode, "d");
+     }
+-    else if (!strcmp(aAction, "leaderdata"))
++
++    if (linkMode.mNetworkData)
+     {
+-        otLeaderData leaderData;
++        strcat(mode, "n");
++    }
++    blobmsg_add_string(&mBuf, "Mode", mode);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        SuccessOrExit(error = otThreadGetLeaderData(mHost->GetInstance(), &leaderData));
++int UbusServer::HandlePartitionId(ubus_request_data *aRequest)
++{
++    blobmsg_add_u32(&mBuf, "Partitionid", otThreadGetPartitionId(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        sJsonUri = blobmsg_open_table(&mBuf, "leaderdata");
++int UbusServer::HandleLeaderData(ubus_request_data *aRequest)
++{
++    otError      error = OT_ERROR_NONE;
++    void        *jsonTable;
++    otLeaderData leaderData;
+ 
+-        blobmsg_add_u32(&mBuf, "PartitionId", leaderData.mPartitionId);
+-        blobmsg_add_u32(&mBuf, "Weighting", leaderData.mWeighting);
+-        blobmsg_add_u32(&mBuf, "DataVersion", leaderData.mDataVersion);
+-        blobmsg_add_u32(&mBuf, "StableDataVersion", leaderData.mStableDataVersion);
+-        blobmsg_add_u32(&mBuf, "LeaderRouterId", leaderData.mLeaderRouterId);
++    SuccessOrExit(error = otThreadGetLeaderData(mHost.GetInstance(), &leaderData));
+ 
+-        blobmsg_close_table(&mBuf, sJsonUri);
+-    }
+-    else if (!strcmp(aAction, "networkdata"))
++    jsonTable = blobmsg_open_table(&mBuf, "leaderdata");
++
++    blobmsg_add_u32(&mBuf, "PartitionId", leaderData.mPartitionId);
++    blobmsg_add_u32(&mBuf, "Weighting", leaderData.mWeighting);
++    blobmsg_add_u32(&mBuf, "DataVersion", leaderData.mDataVersion);
++    blobmsg_add_u32(&mBuf, "StableDataVersion", leaderData.mStableDataVersion);
++    blobmsg_add_u32(&mBuf, "LeaderRouterId", leaderData.mLeaderRouterId);
++
++    blobmsg_close_table(&mBuf, jsonTable);
++
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
++
++int UbusServer::HandleNetworkData(ubus_request_data *aRequest)
++{
++    ubus_send_reply(&mContext, aRequest, mNetworkdataBuf.head);
++    if (time(nullptr) - mLastNetworkDataTime > 10)
+     {
+-        ubus_send_reply(aContext, aRequest, mNetworkdataBuf.head);
+-        if (time(nullptr) - mSecond > 10)
+-        {
+-            static constexpr uint16_t kMaxTlvs = 35;
++        static constexpr uint16_t kMaxTlvs = 35;
+ 
+-            struct otIp6Address address;
+-            uint8_t             tlvTypes[kMaxTlvs];
+-            uint8_t             count             = 0;
+-            char                multicastAddr[10] = "ff03::2";
++        otIp6Address address;
++        uint8_t      tlvTypes[kMaxTlvs];
++        uint8_t      count             = 0;
++        char         multicastAddr[10] = "ff03::2";
+ 
+-            blob_buf_init(&mNetworkdataBuf, 0);
++        blob_buf_init(&mNetworkdataBuf, 0);
+ 
+-            SuccessOrExit(error = otIp6AddressFromString(multicastAddr, &address));
++        SuccessOrExit(otIp6AddressFromString(multicastAddr, &address));
+ 
+-            tlvTypes[count++] = static_cast<uint8_t>(OT_NETWORK_DIAGNOSTIC_TLV_ROUTE);
+-            tlvTypes[count++] = static_cast<uint8_t>(OT_NETWORK_DIAGNOSTIC_TLV_CHILD_TABLE);
++        tlvTypes[count++] = static_cast<uint8_t>(OT_NETWORK_DIAGNOSTIC_TLV_ROUTE);
++        tlvTypes[count++] = static_cast<uint8_t>(OT_NETWORK_DIAGNOSTIC_TLV_CHILD_TABLE);
+ 
+-            sBufNum = 0;
+-            otThreadSendDiagnosticGet(mHost->GetInstance(), &address, tlvTypes, count,
+-                                      &UbusServer::HandleDiagnosticGetResponse, this);
+-            mSecond = time(nullptr);
+-        }
+-        goto exit;
++        mNetworkDataIndex = 0;
++        otThreadSendDiagnosticGet(mHost.GetInstance(), &address, tlvTypes, count,
++                                  &UbusServer::HandleDiagnosticGetResponse, this);
++        mLastNetworkDataTime = time(nullptr);
+     }
+-    else if (!strcmp(aAction, "joinernum"))
++exit:
++    return 0;
++}
++
++int UbusServer::HandleJoinerNum(ubus_request_data *aRequest)
++{
++    void        *jsonTable = nullptr;
++    void        *jsonArray = nullptr;
++    otJoinerInfo joinerInfo;
++    uint16_t     iterator  = 0;
++    int          joinerNum = 0;
++
++    jsonArray = blobmsg_open_array(&mBuf, "joinerList");
++    while (otCommissionerGetNextJoinerInfo(mHost.GetInstance(), &iterator, &joinerInfo) == OT_ERROR_NONE)
+     {
+-        void        *jsonTable = nullptr;
+-        void        *jsonArray = nullptr;
+-        otJoinerInfo joinerInfo;
+-        uint16_t     iterator        = 0;
+-        int          joinerNum       = 0;
+-        char         eui64[EXTPANID] = "";
++        jsonTable = blobmsg_open_table(&mBuf, nullptr);
+ 
+-        blob_buf_init(&mBuf, 0);
++        blobmsg_add_string(&mBuf, "pskd", joinerInfo.mPskd.m8);
+ 
+-        jsonArray = blobmsg_open_array(&mBuf, "joinerList");
+-        while (otCommissionerGetNextJoinerInfo(mHost->GetInstance(), &iterator, &joinerInfo) == OT_ERROR_NONE)
++        switch (joinerInfo.mType)
+         {
+-            memset(eui64, 0, sizeof(eui64));
+-
+-            jsonTable = blobmsg_open_table(&mBuf, nullptr);
++        case OT_JOINER_INFO_TYPE_ANY:
++            blobmsg_add_u16(&mBuf, "isAny", 1);
++            break;
++        case OT_JOINER_INFO_TYPE_EUI64:
++            blobmsg_add_u16(&mBuf, "isAny", 0);
++            blobmsg_add_hex_string(&mBuf, "eui64", joinerInfo.mSharedId.mEui64.m8,
++                                   sizeof(joinerInfo.mSharedId.mEui64.m8));
++            break;
++        case OT_JOINER_INFO_TYPE_DISCERNER:
++            blobmsg_add_u16(&mBuf, "isAny", 0);
++            blobmsg_add_u64(&mBuf, "discernerValue", joinerInfo.mSharedId.mDiscerner.mValue);
++            blobmsg_add_u16(&mBuf, "discernerLength", joinerInfo.mSharedId.mDiscerner.mLength);
++            break;
++        }
+ 
+-            blobmsg_add_string(&mBuf, "pskd", joinerInfo.mPskd.m8);
++        blobmsg_close_table(&mBuf, jsonTable);
+ 
+-            switch (joinerInfo.mType)
+-            {
+-            case OT_JOINER_INFO_TYPE_ANY:
+-                blobmsg_add_u16(&mBuf, "isAny", 1);
+-                break;
+-            case OT_JOINER_INFO_TYPE_EUI64:
+-                blobmsg_add_u16(&mBuf, "isAny", 0);
+-                OutputBytes(joinerInfo.mSharedId.mEui64.m8, sizeof(joinerInfo.mSharedId.mEui64.m8), eui64);
+-                blobmsg_add_string(&mBuf, "eui64", eui64);
+-                break;
+-            case OT_JOINER_INFO_TYPE_DISCERNER:
+-                blobmsg_add_u16(&mBuf, "isAny", 0);
+-                blobmsg_add_u64(&mBuf, "discernerValue", joinerInfo.mSharedId.mDiscerner.mValue);
+-                blobmsg_add_u16(&mBuf, "discernerLength", joinerInfo.mSharedId.mDiscerner.mLength);
+-                break;
+-            }
++        joinerNum++;
++    }
++    blobmsg_close_array(&mBuf, jsonArray);
+ 
+-            blobmsg_close_table(&mBuf, jsonTable);
++    blobmsg_add_u32(&mBuf, "joinernum", joinerNum);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-            joinerNum++;
+-        }
+-        blobmsg_close_array(&mBuf, jsonArray);
++int UbusServer::HandleMacFilterState(ubus_request_data *aRequest)
++{
++    otMacFilterAddressMode mode = otLinkFilterGetAddressMode(mHost.GetInstance());
+ 
+-        blobmsg_add_u32(&mBuf, "joinernum", joinerNum);
++    if (mode == OT_MAC_FILTER_ADDRESS_MODE_DISABLED)
++    {
++        blobmsg_add_string(&mBuf, "state", "disable");
+     }
+-    else if (!strcmp(aAction, "macfilterstate"))
++    else if (mode == OT_MAC_FILTER_ADDRESS_MODE_ALLOWLIST)
+     {
+-        otMacFilterAddressMode mode = otLinkFilterGetAddressMode(mHost->GetInstance());
+-
+-        blob_buf_init(&mBuf, 0);
+-
+-        if (mode == OT_MAC_FILTER_ADDRESS_MODE_DISABLED)
+-        {
+-            blobmsg_add_string(&mBuf, "state", "disable");
+-        }
+-        else if (mode == OT_MAC_FILTER_ADDRESS_MODE_ALLOWLIST)
+-        {
+-            blobmsg_add_string(&mBuf, "state", "allowlist");
+-        }
+-        else if (mode == OT_MAC_FILTER_ADDRESS_MODE_DENYLIST)
+-        {
+-            blobmsg_add_string(&mBuf, "state", "denylist");
+-        }
+-        else
+-        {
+-            blobmsg_add_string(&mBuf, "state", "error");
+-        }
++        blobmsg_add_string(&mBuf, "state", "allowlist");
+     }
+-    else if (!strcmp(aAction, "macfilteraddr"))
++    else if (mode == OT_MAC_FILTER_ADDRESS_MODE_DENYLIST)
+     {
+-        otMacFilterEntry    entry;
+-        otMacFilterIterator iterator = OT_MAC_FILTER_ITERATOR_INIT;
++        blobmsg_add_string(&mBuf, "state", "denylist");
++    }
++    else
++    {
++        blobmsg_add_string(&mBuf, "state", "error");
++    }
+ 
+-        blob_buf_init(&mBuf, 0);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
++}
+ 
+-        sJsonUri = blobmsg_open_array(&mBuf, "addrlist");
++int UbusServer::HandleMacFilterAddr(ubus_request_data *aRequest)
++{
++    otMacFilterEntry    entry;
++    otMacFilterIterator iterator = OT_MAC_FILTER_ITERATOR_INIT;
++    void               *jsonArray;
+ 
+-        while (otLinkFilterGetNextAddress(mHost->GetInstance(), &iterator, &entry) == OT_ERROR_NONE)
+-        {
+-            char extAddress[XPANID_LENGTH] = "";
+-            OutputBytes(entry.mExtAddress.m8, sizeof(entry.mExtAddress.m8), extAddress);
+-            blobmsg_add_string(&mBuf, "addr", extAddress);
+-        }
++    jsonArray = blobmsg_open_array(&mBuf, "addrlist");
+ 
+-        blobmsg_close_array(&mBuf, sJsonUri);
+-    }
+-    else
++    while (otLinkFilterGetNextAddress(mHost.GetInstance(), &iterator, &entry) == OT_ERROR_NONE)
+     {
+-        perror("invalid argument in get information ubus\n");
++        blobmsg_add_hex_string(&mBuf, "addr", entry.mExtAddress.m8, sizeof(entry.mExtAddress.m8));
+     }
+ 
+-    AppendResult(error, aContext, aRequest);
+-exit:
+-    mHostMutex->unlock();
++    blobmsg_close_array(&mBuf, jsonArray);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -1331,24 +811,22 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+ {
+     uint16_t              rloc16;
+     uint16_t              sockRloc16 = 0;
++    void                 *jsonTable  = nullptr;
+     void                 *jsonArray  = nullptr;
+     void                 *jsonItem   = nullptr;
+-    char                  xrloc[10];
+     otNetworkDiagTlv      diagTlv;
+     otNetworkDiagIterator iterator = OT_NETWORK_DIAGNOSTIC_ITERATOR_INIT;
+ 
+     SuccessOrExit(aError);
+ 
+     char networkdata[20];
+-    sprintf(networkdata, "networkdata%d", sBufNum);
+-    sJsonUri = blobmsg_open_table(&mNetworkdataBuf, networkdata);
+-    sBufNum++;
++    sprintf(networkdata, "networkdata%d", mNetworkDataIndex++);
++    jsonTable = blobmsg_open_table(&mNetworkdataBuf, networkdata);
+ 
+     if (IsRoutingLocator(&aMessageInfo->mSockAddr))
+     {
+         sockRloc16 = ntohs(aMessageInfo->mPeerAddr.mFields.m16[7]);
+-        sprintf(xrloc, "0x%04x", sockRloc16);
+-        blobmsg_add_string(&mNetworkdataBuf, "rloc", xrloc);
++        blobmsg_printf(&mNetworkdataBuf, "rloc", "0x%04x", sockRloc16);
+     }
+ 
+     while (otThreadGetNextDiagnosticTlv(aMessage, &iterator, &diagTlv) == OT_ERROR_NONE)
+@@ -1371,8 +849,7 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+                     jsonItem = blobmsg_open_table(&mNetworkdataBuf, "router");
+                     rloc16   = route.mRouteData[i].mRouterId << 10;
+                     blobmsg_add_u32(&mNetworkdataBuf, "routerid", route.mRouteData[i].mRouterId);
+-                    sprintf(xrloc, "0x%04x", rloc16);
+-                    blobmsg_add_string(&mNetworkdataBuf, "rloc", xrloc);
++                    blobmsg_printf(&mNetworkdataBuf, "rloc", "0x%04x", rloc16);
+                     blobmsg_close_table(&mNetworkdataBuf, jsonItem);
+                 }
+             }
+@@ -1396,8 +873,7 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+                 uint8_t mode = 0;
+ 
+                 jsonItem = blobmsg_open_table(&mNetworkdataBuf, "child");
+-                sprintf(xrloc, "0x%04x", (sockRloc16 | entry.mChildId));
+-                blobmsg_add_string(&mNetworkdataBuf, "rloc", xrloc);
++                blobmsg_printf(&mNetworkdataBuf, "rloc", "0x%04x", (sockRloc16 | entry.mChildId));
+ 
+                 mode = (entry.mMode.mRxOnWhenIdle ? kModeRxOnWhenIdle : 0) |
+                        (entry.mMode.mDeviceType ? kModeFullThreadDevice : 0) |
+@@ -1415,7 +891,7 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+         }
+     }
+ 
+-    blobmsg_close_table(&mNetworkdataBuf, sJsonUri);
++    blobmsg_close_table(&mNetworkdataBuf, jsonTable);
+ 
+ exit:
+     if (aError != OT_ERROR_NONE)
+@@ -1424,337 +900,387 @@ exit:
+     }
+ }
+ 
+-int UbusServer::UbusSetInformation(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg,
+-                                   const char               *aAction)
++static constexpr blobmsg_policy kSetNetworkNamePolicy[] = {
++    [0] = {.name = "networkname", .type = BLOBMSG_TYPE_STRING},
++};
++
++int UbusServer::HandleSetNetworkName(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
+ {
+-    OT_UNUSED_VARIABLE(aObj);
+-    OT_UNUSED_VARIABLE(aMethod);
+-    OT_UNUSED_VARIABLE(aMsg);
++    otError error = OT_ERROR_INVALID_ARGS;
++    if (aArgs[0] != nullptr)
++    {
++        char *newName = blobmsg_get_string(aArgs[0]);
++        SuccessOrExit(error = otThreadSetNetworkName(mHost.GetInstance(), newName));
++    }
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
+ 
+-    otError error = OT_ERROR_NONE;
++static constexpr blobmsg_policy kSetChannelPolicy[] = {
++    [0] = {.name = "channel", .type = BLOBMSG_TYPE_INT32},
++};
+ 
+-    blob_buf_init(&mBuf, 0);
++int UbusServer::HandleSetChannel(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError error = OT_ERROR_INVALID_ARGS;
+ 
+-    mHostMutex->lock();
+-    if (!strcmp(aAction, "networkname"))
++    if (aArgs[0] != nullptr)
+     {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
++        uint32_t channel = blobmsg_get_u32(aArgs[0]);
++        SuccessOrExit(error = otLinkSetChannel(mHost.GetInstance(), static_cast<uint8_t>(channel)));
++    }
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
+ 
+-        blobmsg_parse(setNetworknamePolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            char *newName = blobmsg_get_string(tb[SETNETWORK]);
+-            SuccessOrExit(error = otThreadSetNetworkName(mHost->GetInstance(), newName));
+-        }
++static constexpr blobmsg_policy kSetPanIdPolicy[] = {
++    [0] = {.name = "panid", .type = BLOBMSG_TYPE_STRING},
++};
++
++int UbusServer::HandleSetPanId(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError error = OT_ERROR_INVALID_ARGS;
++
++    if (aArgs[0] != nullptr)
++    {
++        long  value;
++        char *panid = blobmsg_get_string(aArgs[0]);
++        SuccessOrExit(error = ParseLong(panid, value));
++        error = otLinkSetPanId(mHost.GetInstance(), static_cast<otPanId>(value));
+     }
+-    else if (!strcmp(aAction, "channel"))
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
++
++static constexpr blobmsg_policy kSetNetworkkeyPolicy[] = {
++    [0] = {.name = "networkkey", .type = BLOBMSG_TYPE_STRING},
++};
++
++int UbusServer::HandleSetNetworkKey(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError error = OT_ERROR_INVALID_ARGS;
++
++    if (aArgs[0] != nullptr)
+     {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
++        otNetworkKey key;
++        char        *networkkey = blobmsg_get_string(aArgs[0]);
+ 
+-        blobmsg_parse(setChannelPolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            uint32_t channel = blobmsg_get_u32(tb[SETNETWORK]);
+-            SuccessOrExit(error = otLinkSetChannel(mHost->GetInstance(), static_cast<uint8_t>(channel)));
+-        }
++        VerifyOrExit(Hex2Bin(networkkey, key.m8, sizeof(key.m8)) == OT_NETWORK_KEY_SIZE, error = OT_ERROR_PARSE);
++        SuccessOrExit(error = otThreadSetNetworkKey(mHost.GetInstance(), &key));
+     }
+-    else if (!strcmp(aAction, "panid"))
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
++
++static constexpr blobmsg_policy kSetPskcPolicy[] = {
++    [0] = {.name = "pskc", .type = BLOBMSG_TYPE_STRING},
++};
++
++int UbusServer::HandleSetPskc(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError error = OT_ERROR_INVALID_ARGS;
++
++    if (aArgs[0] != nullptr)
+     {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
++        otPskc pskc;
+ 
+-        blobmsg_parse(setPanIdPolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            long  value;
+-            char *panid = blobmsg_get_string(tb[SETNETWORK]);
+-            SuccessOrExit(error = ParseLong(panid, value));
+-            error = otLinkSetPanId(mHost->GetInstance(), static_cast<otPanId>(value));
+-        }
++        VerifyOrExit(Hex2Bin(blobmsg_get_string(aArgs[0]), pskc.m8, sizeof(pskc)) == OT_PSKC_MAX_SIZE,
++                     error = OT_ERROR_PARSE);
++        SuccessOrExit(error = otThreadSetPskc(mHost.GetInstance(), &pskc));
+     }
+-    else if (!strcmp(aAction, "networkkey"))
+-    {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
+ 
+-        blobmsg_parse(setNetworkkeyPolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            otNetworkKey key;
+-            char        *networkkey = blobmsg_get_string(tb[SETNETWORK]);
++static constexpr blobmsg_policy kSetExtPanIdPolicy[] = {
++    [0] = {.name = "extpanid", .type = BLOBMSG_TYPE_STRING},
++};
+ 
+-            VerifyOrExit(Hex2Bin(networkkey, key.m8, sizeof(key.m8)) == OT_NETWORK_KEY_SIZE, error = OT_ERROR_PARSE);
+-            SuccessOrExit(error = otThreadSetNetworkKey(mHost->GetInstance(), &key));
+-        }
+-    }
+-    else if (!strcmp(aAction, "pskc"))
++int UbusServer::HandleSetExtPanId(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError error = OT_ERROR_INVALID_ARGS;
++
++    if (aArgs[0] != nullptr)
+     {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
++        otExtendedPanId extPanId;
++        char           *input = blobmsg_get_string(aArgs[0]);
++        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId)) >= 0, error = OT_ERROR_PARSE);
++        error = otThreadSetExtendedPanId(mHost.GetInstance(), &extPanId);
++    }
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
+ 
+-        blobmsg_parse(setPskcPolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            otPskc pskc;
++static constexpr blobmsg_policy kSetModePolicy[] = {
++    [0] = {.name = "mode", .type = BLOBMSG_TYPE_STRING},
++};
+ 
+-            VerifyOrExit(Hex2Bin(blobmsg_get_string(tb[SETNETWORK]), pskc.m8, sizeof(pskc)) == OT_PSKC_MAX_SIZE,
+-                         error = OT_ERROR_PARSE);
+-            SuccessOrExit(error = otThreadSetPskc(mHost->GetInstance(), &pskc));
+-        }
+-    }
+-    else if (!strcmp(aAction, "extpanid"))
+-    {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
++int UbusServer::HandleSetMode(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError          error = OT_ERROR_INVALID_ARGS;
++    otLinkModeConfig linkMode;
+ 
+-        blobmsg_parse(setExtPanIdPolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            otExtendedPanId extPanId;
+-            char           *input = blobmsg_get_string(tb[SETNETWORK]);
+-            VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId)) >= 0, error = OT_ERROR_PARSE);
+-            error = otThreadSetExtendedPanId(mHost->GetInstance(), &extPanId);
+-        }
+-    }
+-    else if (!strcmp(aAction, "mode"))
++    if (aArgs[0] != nullptr)
+     {
+-        otLinkModeConfig  linkMode;
+-        struct blob_attr *tb[SET_NETWORK_MAX];
+-
+-        blobmsg_parse(setModePolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
++        char *inputMode = blobmsg_get_string(aArgs[0]);
++        for (char *ch = inputMode; *ch != '\0'; ch++)
+         {
+-            char *inputMode = blobmsg_get_string(tb[SETNETWORK]);
+-            for (char *ch = inputMode; *ch != '\0'; ch++)
++            switch (*ch)
+             {
+-                switch (*ch)
+-                {
+-                case 'r':
+-                    linkMode.mRxOnWhenIdle = 1;
+-                    break;
++            case 'r':
++                linkMode.mRxOnWhenIdle = 1;
++                break;
+ 
+-                case 'd':
+-                    linkMode.mDeviceType = 1;
+-                    break;
++            case 'd':
++                linkMode.mDeviceType = 1;
++                break;
+ 
+-                case 'n':
+-                    linkMode.mNetworkData = 1;
+-                    break;
++            case 'n':
++                linkMode.mNetworkData = 1;
++                break;
+ 
+-                default:
+-                    ExitNow(error = OT_ERROR_PARSE);
+-                }
++            default:
++                ExitNow(error = OT_ERROR_PARSE);
+             }
+-
+-            SuccessOrExit(error = otThreadSetLinkMode(mHost->GetInstance(), linkMode));
+         }
+-    }
+-    else if (!strcmp(aAction, "macfilteradd"))
+-    {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
+-        otExtAddress      extAddr;
+ 
+-        blobmsg_parse(macfilterAddPolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            char *addr = blobmsg_get_string(tb[SETNETWORK]);
++        SuccessOrExit(error = otThreadSetLinkMode(mHost.GetInstance(), linkMode));
++    }
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
+ 
+-            VerifyOrExit(Hex2Bin(addr, extAddr.m8, OT_EXT_ADDRESS_SIZE) == OT_EXT_ADDRESS_SIZE, error = OT_ERROR_PARSE);
++static constexpr blobmsg_policy kMacfilterAddRemovePolicy[] = {
++    [0] = {.name = "addr", .type = BLOBMSG_TYPE_STRING},
++};
+ 
+-            error = otLinkFilterAddAddress(mHost->GetInstance(), &extAddr);
++int UbusServer::HandleMacFilterAdd(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError      error = OT_ERROR_INVALID_ARGS;
++    otExtAddress extAddr;
+ 
+-            VerifyOrExit(error == OT_ERROR_NONE || error == OT_ERROR_ALREADY);
+-        }
+-    }
+-    else if (!strcmp(aAction, "macfilterremove"))
++    if (aArgs[0] != nullptr)
+     {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
+-        otExtAddress      extAddr;
+-
+-        blobmsg_parse(macfilterRemovePolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            char *addr = blobmsg_get_string(tb[SETNETWORK]);
+-            VerifyOrExit(Hex2Bin(addr, extAddr.m8, OT_EXT_ADDRESS_SIZE) == OT_EXT_ADDRESS_SIZE, error = OT_ERROR_PARSE);
++        char *addr = blobmsg_get_string(aArgs[0]);
+ 
+-            otLinkFilterRemoveAddress(mHost->GetInstance(), &extAddr);
+-        }
+-    }
+-    else if (!strcmp(aAction, "macfiltersetstate"))
+-    {
+-        struct blob_attr *tb[SET_NETWORK_MAX];
++        VerifyOrExit(Hex2Bin(addr, extAddr.m8, OT_EXT_ADDRESS_SIZE) == OT_EXT_ADDRESS_SIZE, error = OT_ERROR_PARSE);
+ 
+-        blobmsg_parse(macfilterSetStatePolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
+-        if (tb[SETNETWORK] != nullptr)
+-        {
+-            char *state = blobmsg_get_string(tb[SETNETWORK]);
++        error = otLinkFilterAddAddress(mHost.GetInstance(), &extAddr);
+ 
+-            if (strcmp(state, "disable") == 0)
+-            {
+-                otLinkFilterSetAddressMode(mHost->GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DISABLED);
+-            }
+-            else if (strcmp(state, "allowlist") == 0)
+-            {
+-                otLinkFilterSetAddressMode(mHost->GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_ALLOWLIST);
+-            }
+-            else if (strcmp(state, "denylist") == 0)
+-            {
+-                otLinkFilterSetAddressMode(mHost->GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DENYLIST);
+-            }
+-        }
+-    }
+-    else if (!strcmp(aAction, "macfilterclear"))
+-    {
+-        otLinkFilterClearAddresses(mHost->GetInstance());
+-    }
+-    else
+-    {
+-        perror("invalid argument in get information ubus\n");
++        VerifyOrExit(error == OT_ERROR_NONE || error == OT_ERROR_ALREADY);
+     }
+-
+ exit:
+-    mHostMutex->unlock();
+-    AppendResult(error, aContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+-void UbusServer::GetState(otInstance *aInstance, char *aState)
++int UbusServer::HandleMacFilterRemove(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
+ {
+-    switch (otThreadGetDeviceRole(aInstance))
++    otError      error = OT_ERROR_INVALID_ARGS;
++    otExtAddress extAddr;
++
++    if (aArgs[0] != nullptr)
+     {
+-    case OT_DEVICE_ROLE_DISABLED:
+-        strcpy(aState, "disabled");
+-        break;
++        char *addr = blobmsg_get_string(aArgs[0]);
++        VerifyOrExit(Hex2Bin(addr, extAddr.m8, OT_EXT_ADDRESS_SIZE) == OT_EXT_ADDRESS_SIZE, error = OT_ERROR_PARSE);
+ 
+-    case OT_DEVICE_ROLE_DETACHED:
+-        strcpy(aState, "detached");
+-        break;
++        otLinkFilterRemoveAddress(mHost.GetInstance(), &extAddr);
++    }
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
+ 
+-    case OT_DEVICE_ROLE_CHILD:
+-        strcpy(aState, "child");
+-        break;
++static constexpr blobmsg_policy kMacfilterSetStatePolicy[] = {
++    [0] = {.name = "state", .type = BLOBMSG_TYPE_STRING},
++};
+ 
+-    case OT_DEVICE_ROLE_ROUTER:
+-        strcpy(aState, "router");
+-        break;
++int UbusServer::HandleMacFilterSetState(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    if (aArgs[0] != nullptr)
++    {
++        char *state = blobmsg_get_string(aArgs[0]);
+ 
+-    case OT_DEVICE_ROLE_LEADER:
+-        strcpy(aState, "leader");
+-        break;
+-    default:
+-        strcpy(aState, "invalid aState");
+-        break;
++        if (strcmp(state, "disable") == 0)
++        {
++            otLinkFilterSetAddressMode(mHost.GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DISABLED);
++        }
++        else if (strcmp(state, "allowlist") == 0)
++        {
++            otLinkFilterSetAddressMode(mHost.GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_ALLOWLIST);
++        }
++        else if (strcmp(state, "denylist") == 0)
++        {
++            otLinkFilterSetAddressMode(mHost.GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DENYLIST);
++        }
+     }
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
+ }
+ 
+-void UbusServer::UbusAddFd()
++int UbusServer::HandleMacFilterClear(ubus_request_data *aRequest)
+ {
+-    // ubus library function
+-    ubus_add_uloop(mContext);
+-
+-#ifdef FD_CLOEXEC
+-    fcntl(mContext->sock.fd, F_SETFD, fcntl(mContext->sock.fd, F_GETFD) | FD_CLOEXEC);
+-#endif
++    otLinkFilterClearAddresses(mHost.GetInstance());
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
+ }
+ 
+-void UbusServer::UbusReconnTimer(struct uloop_timeout *aTimeout)
++int UbusServer::HandleVersion(ubus_request_data *aRequest)
+ {
+-    GetInstance().UbusReconnTimerDetail(aTimeout);
++    blobmsg_add_string(&mBuf, "OtbrVersion", OTBR_PACKAGE_VERSION);
++    blobmsg_add_string(&mBuf, "HostVersion", otGetVersionString());
++    blobmsg_add_string(&mBuf, "RcpVersion", otPlatRadioGetVersionString(mHost.GetInstance()));
++    blobmsg_add_string(&mBuf, "ThreadVersion", mHost.GetThreadVersion());
++    blobmsg_add_u16(&mBuf, "ThreadVersionCode", otThreadGetVersion());
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
+ }
+ 
+-void UbusServer::UbusReconnTimerDetail(struct uloop_timeout *aTimeout)
++int UbusServer::HandleStatus(ubus_request_data *aRequest)
+ {
+-    OT_UNUSED_VARIABLE(aTimeout);
++    {
++        otBorderAgentId id;
++        if (otBorderAgentGetId(mHost.GetInstance(), &id) == OT_ERROR_NONE)
++        {
++            blobmsg_add_hex_string(&mBuf, "BorderAgentId", id.mId, sizeof(id.mId));
++        }
++    }
+ 
+-    static struct uloop_timeout retry = {
+-        list : {},
+-        pending : false,
+-        cb : UbusReconnTimer,
+-        time : {},
+-    };
+-    int time = 2;
++    {
++        otDeviceRole role = otThreadGetDeviceRole(mHost.GetInstance());
++        blobmsg_add_string(&mBuf, "DeviceRole", DeviceRoleToString(role));
++        blobmsg_add_u8(&mBuf, "Attached", IsAttached(role));
++    }
+ 
+-    if (ubus_reconnect(mContext, mSockPath) != 0)
+     {
+-        uloop_timeout_set(&retry, time * 1000);
+-        return;
++        otOperationalDatasetTlvs dataset;
++        mHost.GetDatasetActiveTlvs(dataset);
++        blobmsg_add_hex_string(&mBuf, "ActiveDataset", dataset.mTlvs, dataset.mLength);
++        mHost.GetDatasetPendingTlvs(dataset);
++        blobmsg_add_hex_string(&mBuf, "PendingDataset", dataset.mTlvs, dataset.mLength);
+     }
+ 
+-    UbusAddFd();
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
++    return 0;
+ }
+ 
+-void UbusServer::UbusConnectionLost(struct ubus_context *aContext)
+-{
+-    OT_UNUSED_VARIABLE(aContext);
+-
+-    UbusReconnTimer(nullptr);
+-}
++static constexpr blobmsg_policy kProvisionPolicy[] = {
++    [0] = {.name = "dataset", .type = BLOBMSG_TYPE_STRING},
++};
+ 
+-int UbusServer::DisplayUbusInit(const char *aPath)
++int UbusServer::HandleProvision(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
+ {
+-    uloop_init();
+-    signal(SIGPIPE, SIG_IGN);
+-
+-    mSockPath = aPath;
+-
+-    mContext = ubus_connect(aPath);
+-    if (!mContext)
+-    {
+-        otbrLogErr("Ubus connect failed");
+-        return -1;
+-    }
++    otError                  error = OT_ERROR_INVALID_ARGS;
++    char const              *datasetHex;
++    int                      datasetLength;
++    otOperationalDatasetTlvs dataset;
+ 
+-    otbrLogInfo("Connected as %08x\n", mContext->local_id);
+-    mContext->connection_lost = UbusConnectionLost;
++    datasetHex = blobmsg_get_string(aArgs[0]);
++    VerifyOrExit(datasetHex != nullptr);
++    datasetLength = Hex2Bin(datasetHex, dataset.mTlvs, sizeof(dataset.mTlvs));
++    VerifyOrExit(datasetLength > 0);
++    dataset.mLength = datasetLength;
+ 
+-    /* file description */
+-    UbusAddFd();
++    VerifyOrExit(!otIp6IsEnabled(mHost.GetInstance()), error = OT_ERROR_INVALID_STATE);
+ 
+-    /* Add a object */
+-    if (ubus_add_object(mContext, &otbr) != 0)
+-    {
+-        otbrLogErr("Ubus add obj failed");
+-        return -1;
+-    }
++    SuccessOrExit(error = otDatasetSetActiveTlvs(mHost.GetInstance(), &dataset));
++    SuccessOrExit(error = otIp6SetEnabled(mHost.GetInstance(), true));
++    SuccessOrExit(error = otThreadSetEnabled(mHost.GetInstance(), true));
+ 
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+-void UbusServer::DisplayUbusDone(void)
++void UbusServer::HandleDeviceRoleChanged(otDeviceRole aRole)
+ {
+-    if (mContext)
+-    {
+-        ubus_free(mContext);
+-        mContext = nullptr;
+-    }
++    blob_buf_init(&mBuf, 0);
++    blobmsg_add_string(&mBuf, "DeviceRole", DeviceRoleToString(aRole));
++    blobmsg_add_u8(&mBuf, "Attached", IsAttached(aRole));
++    ubus_notify(&mContext, &Object(), "device_role_changed", mBuf.head, -1);
+ }
+ 
+-void UbusServer::InstallUbusObject(void)
++void UbusServer::HandleActiveDatasetChanged(const otOperationalDatasetTlvs &aDataset)
+ {
+-    char *path = nullptr;
+-
+-    if (-1 == DisplayUbusInit(path))
+-    {
+-        otbrLogErr("Ubus connect failed");
+-        return;
+-    }
+-
+-    otbrLogInfo("Uloop run");
+-    uloop_run();
+-
+-    DisplayUbusDone();
++    OT_UNUSED_VARIABLE(aDataset);
++    blob_buf_init(&mBuf, 0);
++    blobmsg_add_hex_string(&mBuf, "ActiveDataset", aDataset.mTlvs, aDataset.mLength);
++    ubus_notify(&mContext, &Object(), "active_dataset_changed", mBuf.head, -1);
++}
++
++// clang-format off
++#define OTBR_METHOD_NOARG(_name, _method) \
++    UBUS_METHOD_NOARG(_name, (UbusServer::MakeHandler<_method>()))
++
++#define OTBR_METHOD(_name, _method, _policy) \
++    UBUS_METHOD(_name, (UbusServer::MakeHandler<std::extent<decltype(_policy)>::value, _method, _policy>()), _policy)
++
++const ubus_method UbusServer::sMethods[] = {
++    OTBR_METHOD_NOARG("channel", &UbusServer::HandleChannel),
++    OTBR_METHOD("setchannel", &UbusServer::HandleSetChannel, kSetChannelPolicy),
++    OTBR_METHOD_NOARG("networkname", &UbusServer::HandleNetworkName),
++    OTBR_METHOD("setnetworkname", &UbusServer::HandleSetNetworkName, kSetNetworkNamePolicy),
++    OTBR_METHOD_NOARG("panid", &UbusServer::HandlePanId),
++    OTBR_METHOD("setpanid", &UbusServer::HandleSetPanId, kSetPanIdPolicy),
++    OTBR_METHOD_NOARG("extpanid", &UbusServer::HandleExtPanId),
++    OTBR_METHOD("setextpanid", &UbusServer::HandleSetExtPanId, kSetExtPanIdPolicy),
++    OTBR_METHOD_NOARG("networkkey", &UbusServer::HandleNetworkKey),
++    OTBR_METHOD("setnetworkkey", &UbusServer::HandleSetNetworkKey, kSetNetworkkeyPolicy),
++    OTBR_METHOD_NOARG("pskc", &UbusServer::HandlePskc),
++    OTBR_METHOD("setpskc", &UbusServer::HandleSetPskc, kSetPskcPolicy),
++    OTBR_METHOD_NOARG("mode", &UbusServer::HandleMode),
++    OTBR_METHOD("setmode", &UbusServer::HandleSetMode, kSetModePolicy),
++
++    OTBR_METHOD_NOARG("interfacename", &UbusServer::HandleInterfaceName),
++    OTBR_METHOD_NOARG("leaderdata", &UbusServer::HandleLeaderData),
++    OTBR_METHOD_NOARG("neighbor", &UbusServer::HandleNeighbor),
++    OTBR_METHOD_NOARG("networkdata", &UbusServer::HandleNetworkData),
++    OTBR_METHOD_NOARG("parent", &UbusServer::HandleParent),
++    OTBR_METHOD_NOARG("partitionid", &UbusServer::HandlePartitionId),
++    OTBR_METHOD_NOARG("rloc16", &UbusServer::HandleRloc16),
++    OTBR_METHOD_NOARG("state", &UbusServer::HandleState),
++
++    OTBR_METHOD_NOARG("scan", &UbusServer::HandleScan),
++    OTBR_METHOD_NOARG("leave", &UbusServer::HandleLeave),
++    OTBR_METHOD("mgmtset", &UbusServer::HandleMgmtSet, kMgmtSetPolicy),
++    OTBR_METHOD_NOARG("threadstart", &UbusServer::HandleThreadStart),
++    OTBR_METHOD_NOARG("threadstop", &UbusServer::HandleThreadStop),
++
++    OTBR_METHOD_NOARG("commissionerstart", &UbusServer::HandleCommissionerStart),
++    OTBR_METHOD("joineradd", &UbusServer::HandleJoinerAdd, kJoinerAddPolicy),
++    OTBR_METHOD_NOARG("joinernum", &UbusServer::HandleJoinerNum),
++    OTBR_METHOD("joinerremove", &UbusServer::HandleJoinerRemove, kJoinerRemovePolicy),
++
++    OTBR_METHOD("macfilteradd", &UbusServer::HandleMacFilterAdd, kMacfilterAddRemovePolicy),
++    OTBR_METHOD("macfilterremove", &UbusServer::HandleMacFilterRemove, kMacfilterAddRemovePolicy),
++    OTBR_METHOD_NOARG("macfilterclear", &UbusServer::HandleMacFilterClear),
++    OTBR_METHOD_NOARG("macfilterstate", &UbusServer::HandleMacFilterState),
++    OTBR_METHOD("macfiltersetstate", &UbusServer::HandleMacFilterSetState, kMacfilterSetStatePolicy),
++    OTBR_METHOD_NOARG("macfilteraddr", &UbusServer::HandleMacFilterAddr),
++
++    OTBR_METHOD_NOARG("version", &UbusServer::HandleVersion),
++    OTBR_METHOD_NOARG("status", &UbusServer::HandleStatus),
++    OTBR_METHOD("provision", &UbusServer::HandleProvision, kProvisionPolicy),
++};
++// clang-format on
+ 
+-    uloop_done();
+-}
++ubus_object_type UbusServer::sObjectType = UBUS_OBJECT_TYPE("otbr", sMethods);
+ 
+-otError UbusServer::ParseLong(char *aString, long &aLong)
++otError ParseLong(char *aString, long &aLong)
+ {
+     char *endptr;
+     aLong = strtol(aString, &endptr, 0);
+     return (*endptr == '\0') ? OT_ERROR_NONE : OT_ERROR_PARSE;
+ }
+ 
+-int UbusServer::Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength)
++int Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength)
+ {
+     size_t      hexLength = strlen(aHex);
+     const char *hexEnd    = aHex + hexLength;
+@@ -1805,52 +1331,130 @@ exit:
+     return rval;
+ }
+ 
+-void UBusAgent::Init(void)
++// === UloopProcessor ===
++
++UloopProcessor *UloopProcessor::sInstance = nullptr;
++
++UloopProcessor::~UloopProcessor()
++{
++    if (uloop_fd_set_cb == &ULoopFDHandler)
++    {
++        otbrLogDebug("Shutting down uloop");
++        uloop_done();
++        uloop_fd_set_cb = nullptr;
++        sInstance       = nullptr;
++    }
++}
++
++void UloopProcessor::Init()
++{
++    VerifyOrDie(sInstance == nullptr, "Cannot initialize multiple uloop instances");
++    VerifyOrDie(uloop_fd_set_cb == nullptr, "An uloop fd set callback is already installed");
++    otbrLogDebug("Initializing uloop");
++    sInstance       = this;
++    uloop_fd_set_cb = &ULoopFDHandler;
++    uloop_init();
++}
++
++void UloopProcessor::ULoopFDHandler(uloop_fd *aFd, unsigned int aFlags)
+ {
+-    otbr::ubus::sUbusEfd = eventfd(0, 0);
++    VerifyOrDie((aFlags & ~(ULOOP_READ | ULOOP_WRITE | ULOOP_BLOCKING)) == 0, "Unsupported uloop fd flags");
++    if (aFlags & (ULOOP_READ | ULOOP_WRITE))
++    {
++        // flags will be saved by uloop in aFd->flags
++        UloopProcessor::sInstance->mFds.insert(aFd);
++    }
++    else
++    {
++        UloopProcessor::sInstance->mFds.erase(aFd);
++    }
++}
+ 
+-    otbr::ubus::UbusServer::Initialize(&mHost, &mThreadMutex);
++void UloopProcessor::Update(MainloopContext &aMainloop)
++{
++    for (auto &fd : mFds)
++    {
++        uint8_t sets = 0;
++        if (fd->flags & ULOOP_READ)
++        {
++            sets |= MainloopContext::kReadFdSet;
++        }
++        if (fd->flags & ULOOP_WRITE)
++        {
++            sets |= MainloopContext::kWriteFdSet;
++        }
++        aMainloop.AddFdToSet(fd->fd, sets);
++    }
+ 
+-    if (otbr::ubus::sUbusEfd == -1)
++    std::chrono::duration<int, std::milli> timeout(uloop_get_next_timeout());
++    if (timeout.count() > 0)
+     {
+-        perror("Failed to create eventfd for ubus");
+-        exit(EXIT_FAILURE);
++        auto timeval = ToTimeval(timeout);
++        if (timercmp(&timeval, &aMainloop.mTimeout, <))
++        {
++            aMainloop.mTimeout = timeval;
++        }
+     }
++}
+ 
+-    std::thread(UbusServerRun).detach();
++void UloopProcessor::Process(const MainloopContext &aMainloop)
++{
++    OT_UNUSED_VARIABLE(aMainloop);
++    uloop_run_timeout(0);
+ }
+ 
+-void UBusAgent::Update(MainloopContext &aMainloop)
++// === UBusAgent ===
++
++UBusAgent::UBusAgent(otbr::Host::RcpHost &aHost)
++    : ubus_context{}
++    , uloop_timeout{}
++    , mServer(Context(), aHost)
+ {
+-    VerifyOrExit(otbr::ubus::sUbusEfd != -1);
++}
+ 
+-    aMainloop.AddFdToReadSet(otbr::ubus::sUbusEfd);
+-exit:
+-    mThreadMutex.unlock();
+-    return;
++UBusAgent::~UBusAgent()
++{
++    uloop_timeout_cancel(&ReconnectTimer());
++    ubus_shutdown(&Context());
+ }
+ 
+-void UBusAgent::Process(const MainloopContext &aMainloop)
++void UBusAgent::Init()
+ {
+-    ssize_t  retval;
+-    uint64_t num;
++    UloopProcessor::Init();
+ 
+-    mThreadMutex.lock();
++    // Hard-fail on initial connection error; later disconnection is handled gracefully.
++    VerifyOrDie(ubus_connect_ctx(&Context(), nullptr) == 0, "Unable to connect to ubus");
++    UbusConnected();
+ 
+-    VerifyOrExit(otbr::ubus::sUbusEfd != -1);
++    mServer.Init();
++}
++
++void UBusAgent::UbusConnected()
++{
++    otbrLogInfo("Connected to ubus (peer id %08x)", Context().local_id);
++    Context().connection_lost = [](ubus_context *aCtx) { static_cast<UBusAgent *>(aCtx)->OnConnectionLost(); };
++    ubus_add_uloop(&Context());
++}
+ 
+-    if (FD_ISSET(otbr::ubus::sUbusEfd, &aMainloop.mReadFdSet))
++void UBusAgent::OnConnectionLost()
++{
++    otbrLogInfo("Connection to ubus lost");
++    // Make the first attempt immediately
++    OnReconnectTimer();
++}
++
++void UBusAgent::OnReconnectTimer()
++{
++    otbrLogDebug("Reconnecting...");
++    if (ubus_reconnect(&Context(), nullptr) == 0)
+     {
+-        retval = read(otbr::ubus::sUbusEfd, &num, sizeof(uint64_t));
+-        if (retval != sizeof(uint64_t))
+-        {
+-            perror("read ubus eventfd failed\n");
+-            exit(EXIT_FAILURE);
+-        }
++        UbusConnected();
++    }
++    else
++    {
++        ReconnectTimer().cb = [](uloop_timeout *aTimeout) { static_cast<UBusAgent *>(aTimeout)->OnReconnectTimer(); };
++        uloop_timeout_set(&ReconnectTimer(), 2000 /* ms */);
+     }
+-
+-exit:
+-    return;
+ }
+ 
+ } // namespace ubus
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index f87e9c1c4e..c8e873dfda 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -1,5 +1,5 @@
+ /*
+- *  Copyright (c) 2019, The OpenThread Authors.
++ *  Copyright (c) 2019-2025, The OpenThread Authors.
+  *  All rights reserved.
+  *
+  *  Redistribution and use in source and binary forms, with or without
+@@ -36,25 +36,13 @@
+ 
+ #include "openthread-br/config.h"
+ 
+-#include <stdarg.h>
+-#include <time.h>
++#include <set>
+ 
+-#include <openthread/ip6.h>
+-#include <openthread/link.h>
+-#include <openthread/netdiag.h>
+-#include <openthread/udp.h>
++#include <libubus.h>
++#include <openthread/thread.h>
+ 
+ #include "common/code_utils.hpp"
+ #include "common/mainloop.hpp"
+-#include "host/rcp_host.hpp"
+-
+-extern "C" {
+-#include <libubox/blobmsg_json.h>
+-#include <libubox/uloop.h>
+-#include <libubox/ustream.h>
+-#include <libubox/utils.h>
+-#include <libubus.h>
+-}
+ 
+ namespace otbr {
+ namespace Host {
+@@ -63,1019 +51,185 @@ class RcpHost;
+ 
+ namespace ubus {
+ 
+-/**
+- * @namespace otbr::ubus
+- *
+- * @brief
+- *   This namespace contains definitions for ubus related instance.
+- */
++// Implementation note: Some of these classes use a pattern of inheriting
++// privately from ubus_* structs that would commonly be members instead.
++// This pattern allows static callback stubs that receive a pointer to the
++// ubus structure to recover the owning object via a simple down cast from
++// the base class pointer. In C, these functions would instead use
++// conainer_of(), but its use is not generally safe in C++, especially when
++// the container type is not standard-layout.
+ 
+-class UbusServer
++class UbusServer : private ubus_object
+ {
+ public:
+-    /**
+-     * Constructor
+-     *
+-     * @param[in] aHost  A pointer to OpenThread Controller structure.
+-     * @param[in] aMutex       A pointer to mutex.
+-     */
+-    static void Initialize(Host::RcpHost *aHost, std::mutex *aMutex);
+-
+-    /**
+-     * This method return the instance of the global UbusServer.
+-     *
+-     * @retval The reference of the UbusServer Instance.
+-     */
+-    static UbusServer &GetInstance(void);
+-
+-    /**
+-     * This method install ubus object onto OpenWRT.
+-     */
+-    void InstallUbusObject(void);
+-
+-    /**
+-     * This method handle ubus scan function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusScanHandler(struct ubus_context      *aContext,
+-                               struct ubus_object       *aObj,
+-                               struct ubus_request_data *aRequest,
+-                               const char               *aMethod,
+-                               struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get channel function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusChannelHandler(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set channel function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusSetChannelHandler(struct ubus_context      *aContext,
+-                                     struct ubus_object       *aObj,
+-                                     struct ubus_request_data *aRequest,
+-                                     const char               *aMethod,
+-                                     struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get networkname function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusNetworknameHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set networkname function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusSetNetworknameHandler(struct ubus_context      *aContext,
+-                                         struct ubus_object       *aObj,
+-                                         struct ubus_request_data *aRequest,
+-                                         const char               *aMethod,
+-                                         struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get state function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusStateHandler(struct ubus_context      *aContext,
+-                                struct ubus_object       *aObj,
+-                                struct ubus_request_data *aRequest,
+-                                const char               *aMethod,
+-                                struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set state function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusMacfilterSetStateHandler(struct ubus_context      *aContext,
+-                                            struct ubus_object       *aObj,
+-                                            struct ubus_request_data *aRequest,
+-                                            const char               *aMethod,
+-                                            struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get panid function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusPanIdHandler(struct ubus_context      *aContext,
+-                                struct ubus_object       *aObj,
+-                                struct ubus_request_data *aRequest,
+-                                const char               *aMethod,
+-                                struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set panid function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusSetPanIdHandler(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get pskc function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusPskcHandler(struct ubus_context      *aContext,
+-                               struct ubus_object       *aObj,
+-                               struct ubus_request_data *aRequest,
+-                               const char               *aMethod,
+-                               struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set pskc function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusSetPskcHandler(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get networkkey function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusNetworkkeyHandler(struct ubus_context      *aContext,
+-                                     struct ubus_object       *aObj,
+-                                     struct ubus_request_data *aRequest,
+-                                     const char               *aMethod,
+-                                     struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set networkkey function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusSetNetworkkeyHandler(struct ubus_context      *aContext,
+-                                        struct ubus_object       *aObj,
+-                                        struct ubus_request_data *aRequest,
+-                                        const char               *aMethod,
+-                                        struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get rloc16 function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusRloc16Handler(struct ubus_context      *aContext,
+-                                 struct ubus_object       *aObj,
+-                                 struct ubus_request_data *aRequest,
+-                                 const char               *aMethod,
+-                                 struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get extpanid function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusExtPanIdHandler(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set extpanid function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusSetExtPanIdHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get mode function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusModeHandler(struct ubus_context      *aContext,
+-                               struct ubus_object       *aObj,
+-                               struct ubus_request_data *aRequest,
+-                               const char               *aMethod,
+-                               struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus set mode function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusSetModeHandler(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get partitionid function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusPartitionIdHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get leaderdata function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusLeaderdataHandler(struct ubus_context      *aContext,
+-                                     struct ubus_object       *aObj,
+-                                     struct ubus_request_data *aRequest,
+-                                     const char               *aMethod,
+-                                     struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get networkdata function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusNetworkdataHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get parent function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusParentHandler(struct ubus_context      *aContext,
+-                                 struct ubus_object       *aObj,
+-                                 struct ubus_request_data *aRequest,
+-                                 const char               *aMethod,
+-                                 struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get neighbor function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusNeighborHandler(struct ubus_context      *aContext,
+-                                   struct ubus_object       *aObj,
+-                                   struct ubus_request_data *aRequest,
+-                                   const char               *aMethod,
+-                                   struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus start thread function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusThreadStartHandler(struct ubus_context      *aContext,
+-                                      struct ubus_object       *aObj,
+-                                      struct ubus_request_data *aRequest,
+-                                      const char               *aMethod,
+-                                      struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus stop thread function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusThreadStopHandler(struct ubus_context      *aContext,
+-                                     struct ubus_object       *aObj,
+-                                     struct ubus_request_data *aRequest,
+-                                     const char               *aMethod,
+-                                     struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus leave function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusLeaveHandler(struct ubus_context      *aContext,
+-                                struct ubus_object       *aObj,
+-                                struct ubus_request_data *aRequest,
+-                                const char               *aMethod,
+-                                struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get macfilter address function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusMacfilterAddrHandler(struct ubus_context      *aContext,
+-                                        struct ubus_object       *aObj,
+-                                        struct ubus_request_data *aRequest,
+-                                        const char               *aMethod,
+-                                        struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus get macfilter state function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusMacfilterStateHandler(struct ubus_context      *aContext,
+-                                         struct ubus_object       *aObj,
+-                                         struct ubus_request_data *aRequest,
+-                                         const char               *aMethod,
+-                                         struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus macfilter address add function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusMacfilterAddHandler(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus macfilter address clear function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusMacfilterClearHandler(struct ubus_context      *aContext,
+-                                         struct ubus_object       *aObj,
+-                                         struct ubus_request_data *aRequest,
+-                                         const char               *aMethod,
+-                                         struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus macfilter address remove function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusMacfilterRemoveHandler(struct ubus_context      *aContext,
+-                                          struct ubus_object       *aObj,
+-                                          struct ubus_request_data *aRequest,
+-                                          const char               *aMethod,
+-                                          struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus start commissioner function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusCommissionerStartHandler(struct ubus_context      *aContext,
+-                                            struct ubus_object       *aObj,
+-                                            struct ubus_request_data *aRequest,
+-                                            const char               *aMethod,
+-                                            struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus add joiner function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusJoinerAddHandler(struct ubus_context      *aContext,
+-                                    struct ubus_object       *aObj,
+-                                    struct ubus_request_data *aRequest,
+-                                    const char               *aMethod,
+-                                    struct blob_attr         *aMsg);
++    UbusServer(ubus_context &aContext, Host::RcpHost &aHost);
+ 
+     /**
+-     * This method handle ubus remove joiner function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
++     * Publishes the server object on ubus.
+      */
+-    static int UbusJoinerRemoveHandler(struct ubus_context      *aContext,
+-                                       struct ubus_object       *aObj,
+-                                       struct ubus_request_data *aRequest,
+-                                       const char               *aMethod,
+-                                       struct blob_attr         *aMsg);
++    void Init();
+ 
+-    /**
+-     * This method handle ubus get joiner information function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusJoinerNumHandler(struct ubus_context      *aContext,
+-                                    struct ubus_object       *aObj,
+-                                    struct ubus_request_data *aRequest,
+-                                    const char               *aMethod,
+-                                    struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus mgmtset function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusMgmtsetHandler(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle ubus interfaceName function request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    static int UbusInterfaceNameHandler(struct ubus_context      *aContext,
+-                                        struct ubus_object       *aObj,
+-                                        struct ubus_request_data *aRequest,
+-                                        const char               *aMethod,
+-                                        struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle initial diagnostic get response.
+-     *
+-     * @param[in] aError        A error of receiving the diagnostic response.
+-     * @param[in] aMessage      A pointer to the message.
+-     * @param[in] aMessageInfo  A pointer to the message information.
+-     * @param[in] aContext      A pointer to the context.
+-     */
++private:
++    // === Ubus method handlers ===
++
++    int HandleInterfaceName(ubus_request_data *aRequest);
++    int HandleRloc16(ubus_request_data *aRequest);
++    int HandleLeaderData(ubus_request_data *aRequest);
++    int HandleNeighbor(ubus_request_data *aRequest);
++    int HandleNetworkData(ubus_request_data *aRequest);
++    int HandleParent(ubus_request_data *aRequest);
++    int HandlePartitionId(ubus_request_data *aRequest);
++    int HandleState(ubus_request_data *aRequest);
++
++    int HandleChannel(ubus_request_data *aRequest);
++    int HandleSetChannel(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleNetworkName(ubus_request_data *aRequest);
++    int HandleSetNetworkName(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandlePanId(ubus_request_data *aRequest);
++    int HandleSetPanId(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleExtPanId(ubus_request_data *aRequest);
++    int HandleSetExtPanId(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleNetworkKey(ubus_request_data *aRequest);
++    int HandleSetNetworkKey(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandlePskc(ubus_request_data *aRequest);
++    int HandleSetPskc(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleMode(ubus_request_data *aRequest);
++    int HandleSetMode(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++
++    int HandleScan(ubus_request_data *aRequest);
++    int HandleLeave(ubus_request_data *aRequest);
++    int HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&aArgs)[6]);
++    int HandleThreadStart(ubus_request_data *aRequest);
++    int HandleThreadStop(ubus_request_data *aRequest);
++
++    int HandleCommissionerStart(ubus_request_data *aRequest);
++    int HandleJoinerAdd(ubus_request_data *aRequest, blob_attr *(&aArgs)[2]);
++    int HandleJoinerNum(ubus_request_data *aRequest);
++    int HandleJoinerRemove(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++
++    int HandleMacFilterAdd(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleMacFilterRemove(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleMacFilterClear(ubus_request_data *aRequest);
++    int HandleMacFilterState(ubus_request_data *aRequest);
++    int HandleMacFilterSetState(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleMacFilterAddr(ubus_request_data *aRequest);
++
++    int HandleVersion(ubus_request_data *aRequest);
++    int HandleStatus(ubus_request_data *aRequest);
++    int HandleProvision(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++
++    // === Callbacks ===
++
++    // otThreadSendDiagnosticGet callback
+     static void HandleDiagnosticGetResponse(otError              aError,
+                                             otMessage           *aMessage,
+                                             const otMessageInfo *aMessageInfo,
+                                             void                *aContext);
++    void        HandleDiagnosticGetResponse(otError aError, otMessage *aMessage, const otMessageInfo *aMessageInfo);
+ 
+-    /**
+-     * This method handle diagnosticget response.
+-     *
+-     * @param[in] aError       A error of receiving the diagnostic response.
+-     * @param[in] aMessage     A pointer to the message.
+-     * @param[in] aMessageInfo A pointer to the message information.
+-     */
+-    void HandleDiagnosticGetResponse(otError aError, otMessage *aMessage, const otMessageInfo *aMessageInfo);
+-
+-private:
+-    bool                 mIfFinishScan;
+-    struct ubus_context *mContext;
+-    const char          *mSockPath;
+-    struct blob_buf      mBuf;
+-    struct blob_buf      mNetworkdataBuf;
+-    Host::RcpHost       *mHost;
+-    std::mutex          *mHostMutex;
+-    time_t               mSecond;
+-    enum
+-    {
+-        kDefaultJoinerTimeout = 120,
+-    };
+-
+-    /**
+-     * Constructor
+-     *
+-     * @param[in] aHost    The pointer to OpenThread Controller structure.
+-     * @param[in] aMutex   A pointer to mutex.
+-     */
+-    UbusServer(Host::RcpHost *aHost, std::mutex *aMutex);
+-
+-    /**
+-     * This method start scan.
+-     */
+-    void ProcessScan(void);
+-
+-    /**
+-     * This method detailly start scan.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusScanHandlerDetail(struct ubus_context      *aContext,
+-                              struct ubus_object       *aObj,
+-                              struct ubus_request_data *aRequest,
+-                              const char               *aMethod,
+-                              struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method handle scan result (callback function).
+-     *
+-     * @param[in] aResult   A pointer to result.
+-     * @param[in] aContext  A pointer to context.
+-     */
++    // otLinkActiveScan callback
+     static void HandleActiveScanResult(otActiveScanResult *aResult, void *aContext);
++    void        HandleActiveScanResultDetail(otActiveScanResult *aResult);
+ 
+-    /**
+-     * This method detailly handler the scan result, called by HandleActiveScanResult.
+-     *
+-     * @param[in] aResult  A pointer to result.
+-     */
+-    void HandleActiveScanResultDetail(otActiveScanResult *aResult);
+-
+-    /**
+-     * This method detailly handler get neighbor information.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusNeighborHandlerDetail(struct ubus_context      *aContext,
+-                                  struct ubus_object       *aObj,
+-                                  struct ubus_request_data *aRequest,
+-                                  const char               *aMethod,
+-                                  struct blob_attr         *aMsg);
+-
+-    /**
+-     * This method detailly handler get parent information.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusParentHandlerDetail(struct ubus_context      *aContext,
+-                                struct ubus_object       *aObj,
+-                                struct ubus_request_data *aRequest,
+-                                const char               *aMethod,
+-                                struct blob_attr         *aMsg);
++    // otCommissionerStart callbacks
++    static void HandleStateChanged(otCommissionerState aState, void *aContext);
++    void        HandleStateChanged(otCommissionerState aState);
++    static void HandleJoinerEvent(otCommissionerJoinerEvent aEvent,
++                                  const otJoinerInfo       *aJoinerInfo,
++                                  const otExtAddress       *aJoinerId,
++                                  void                     *aContext);
++    void        HandleJoinerEvent(otCommissionerJoinerEvent aEvent,
++                                  const otJoinerInfo       *aJoinerInfo,
++                                  const otExtAddress       *aJoinerId);
+ 
+-    /**
+-     * This method handle mgmtset request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusMgmtset(struct ubus_context      *aContext,
+-                    struct ubus_object       *aObj,
+-                    struct ubus_request_data *aRequest,
+-                    const char               *aMethod,
+-                    struct blob_attr         *aMsg);
++    // ThreadHelper callbacks
++    void HandleDeviceRoleChanged(otDeviceRole role);
++    void HandleActiveDatasetChanged(const otOperationalDatasetTlvs &dataset);
+ 
+-    /**
+-     * This method handle leave request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusLeaveHandlerDetail(struct ubus_context      *aContext,
+-                               struct ubus_object       *aObj,
+-                               struct ubus_request_data *aRequest,
+-                               const char               *aMethod,
+-                               struct blob_attr         *aMsg);
++    // === Internal helpers ===
+ 
+-    /**
+-     * This method handle thread related request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     * @param[in] aAction   A pointer to the action needed.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusThreadHandler(struct ubus_context      *aContext,
+-                          struct ubus_object       *aObj,
+-                          struct ubus_request_data *aRequest,
+-                          const char               *aMethod,
+-                          struct blob_attr         *aMsg,
+-                          const char               *aAction);
+-
+-    /**
+-     * This method handle get information request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     * @param[in] aAction   A pointer to the action needed.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusGetInformation(struct ubus_context      *aContext,
+-                           struct ubus_object       *aObj,
+-                           struct ubus_request_data *aRequest,
+-                           const char               *aMethod,
+-                           struct blob_attr         *aMsg,
+-                           const char               *action);
+-
+-    /**
+-     * This method handle set information request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     * @param[in] aAction   A pointer to the action needed.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusSetInformation(struct ubus_context      *aContext,
+-                           struct ubus_object       *aObj,
+-                           struct ubus_request_data *aRequest,
+-                           const char               *aMethod,
+-                           struct blob_attr         *aMsg,
+-                           const char               *aAction);
++    // Creates a ubus_handler_t wrapper function for an ubus method without arguments
++    template <int (UbusServer::*Method)(ubus_request_data *)> static constexpr ubus_handler_t MakeHandler()
++    {
++        return [](ubus_context *aContext, ubus_object *aObj, ubus_request_data *aRequest, const char *aMethod,
++                  blob_attr *aMsg) {
++            OT_UNUSED_VARIABLE(aContext);
++            OT_UNUSED_VARIABLE(aMsg);
++            return (PrepareInvoke(aObj, aRequest, aMethod).*Method)(aRequest);
++        };
++    }
+ 
+-    /**
+-     * This method handle commissioner related request.
+-     *
+-     * @param[in] aContext  A pointer to the ubus context.
+-     * @param[in] aObj      A pointer to the ubus object.
+-     * @param[in] aRequest  A pointer to the ubus request.
+-     * @param[in] aMethod   A pointer to the ubus method.
+-     * @param[in] aMsg      A pointer to the ubus message.
+-     * @param[in] aAction   A pointer to the action needed.
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int UbusCommissioner(struct ubus_context      *aContext,
+-                         struct ubus_object       *aObj,
+-                         struct ubus_request_data *aRequest,
+-                         const char               *aMethod,
+-                         struct blob_attr         *aMsg,
+-                         const char               *aAction);
++    // Creates a ubus_handler_t wrapper function for an ubus method with arguments.
++    // The array of blob_attr pointers is passed by reference to ensure the method
++    // accepts the correct number of arguments that matches the policy.
++    template <size_t NumArgs,
++              int (UbusServer::*Method)(ubus_request_data *, blob_attr *(&)[NumArgs]),
++              const blobmsg_policy (&Policy)[NumArgs]>
++    static constexpr ubus_handler_t MakeHandler()
++    {
++        return [](ubus_context *aContext, ubus_object *aObj, ubus_request_data *aRequest, const char *aMethod,
++                  blob_attr *aMsg) {
++            OT_UNUSED_VARIABLE(aContext);
++            blob_attr *args[NumArgs]; // fully initialized by blobmsg_parse
++            blobmsg_parse(Policy, NumArgs, args, blob_data(aMsg), blob_len(aMsg));
++            return (PrepareInvoke(aObj, aRequest, aMethod).*Method)(aRequest, args);
++        };
++    }
+ 
+-    /**
+-     * This method handle conmmissione state change (callback function).
+-     *
+-     * @param[in] aState    The state of commissioner.
+-     * @param[in] aContext  A pointer to the ubus context.
+-     */
+-    static void HandleStateChanged(otCommissionerState aState, void *aContext);
++    static UbusServer &PrepareInvoke(ubus_object *aObj, ubus_request_data *aRequest, const char *aMethod);
+ 
+-    /**
+-     * This method handle conmmissione state change.
+-     *
+-     * @param[in] aState  The state of commissioner.
+-     */
+-    void HandleStateChanged(otCommissionerState aState);
++    // Adds the provided error code to the response and sends it.
++    void SendInvokeResponse(ubus_request_data *aRequest, blob_buf *aBuf, otError aError);
+ 
+-    /**
+-     * This method handle joiner event (callback function).
+-     *
+-     * @param[in] aEvent       The joiner event type.
+-     * @param[in] aJoinerInfo  A pointer to the Joiner Info.
+-     * @param[in] aJoinerId    A pointer to the Joiner ID (if not known, it will be NULL).
+-     * @param[in] aContext     A pointer to application-specific context.
+-     */
+-    static void HandleJoinerEvent(otCommissionerJoinerEvent aEvent,
+-                                  const otJoinerInfo       *aJoinerInfo,
+-                                  const otExtAddress       *aJoinerId,
+-                                  void                     *aContext);
++    static const ubus_method sMethods[];
++    static ubus_object_type  sObjectType;
+ 
+-    /**
+-     * This method handle joiner event.
+-     *
+-     * @param[in] aEvent       The joiner event type.
+-     * @param[in] aJoinerInfo  A pointer to the Joiner Info.
+-     * @param[in] aJoinerId    A pointer to the Joiner ID (if not known, it will be NULL).
+-     */
+-    void HandleJoinerEvent(otCommissionerJoinerEvent aEvent,
+-                           const otJoinerInfo       *aJoinerInfo,
+-                           const otExtAddress       *aJoinerId);
++    ubus_object &Object() { return *this; }
+ 
+-    /**
+-     * This method convert thread network state to string.
+-     *
+-     * @param[in]  aInstance  A pointer to the instance.
+-     * @param[out] aState     A pointer to the string address.
+-     */
+-    void GetState(otInstance *aInstance, char *aState);
++    ubus_context  &mContext;
++    Host::RcpHost &mHost;
+ 
+-    /**
+-     * This method add fd of ubus object.
+-     */
+-    void UbusAddFd(void);
++    blob_buf mBuf{}; // default buffer for sync responses
+ 
+-    /**
+-     * This method set ubus reconnect time.
+-     *
+-     * @param[in] aTimeout  A pointer to the timeout.
+-     */
+-    static void UbusReconnTimer(struct uloop_timeout *aTimeout);
++    blob_buf mNetworkdataBuf{};
++    int      mNetworkDataIndex;
++    time_t   mLastNetworkDataTime = 0;
+ 
+-    /**
+-     * This method detailly handle ubus reconnect time.
+-     *
+-     * @param[in] aTimeout  A pointer to the timeout.
+-     */
+-    void UbusReconnTimerDetail(struct uloop_timeout *aTimeout);
++    ubus_request_data mScanRequest;
++    blob_buf          mScanBuf{};
++    void             *mScanArray;
++};
+ 
+-    /**
+-     * This method handle ubus connection lost.
+-     *
+-     * @param[in] aContext  A pointer to the context.
+-     */
+-    static void UbusConnectionLost(struct ubus_context *aContext);
++/**
++ * Integrates uloop with the OTBR main loop.
++ */
++class UloopProcessor : public MainloopProcessor
++{
++public:
++    UloopProcessor() = default;
++    virtual ~UloopProcessor();
+ 
+     /**
+-     * This method connect and display ubus.
++     * Initializes uloop.
+      *
+-     * @param[in] aPath  A pointer to the ubus server path(default is nullptr).
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int DisplayUbusInit(const char *aPath);
+-
+-    /**
+-     * This method disconnect and display ubus.
++     * Note: This will install signal handlers for SIGINT and SIGTERM if none have been installed yet.
++     * These handlers only work correctly when using the uloop main loop via uloop_run(). This means
++     * our otbr::Application handlers must be installed before calling this method.
+      */
+-    void DisplayUbusDone(void);
++    void Init();
+ 
+-    /**
+-     * This method parses an ASCII string as a long.
+-     *
+-     * @param[in]  aString  A pointer to the ASCII string.
+-     * @param[out] aLong    A reference to where the parsed long is placed.
+-     *
+-     * @retval OT_ERROR_NONE   Successfully parsed the ASCII string.
+-     * @retval OT_ERROR_PARSE  Could not parse the ASCII string.
+-     */
+-    otError ParseLong(char *aString, long &aLong);
++    void Update(MainloopContext &aMainloop) override;
++    void Process(const MainloopContext &aMainloop) override;
+ 
+-    /**
+-     * This method converts a hex string to binary.
+-     *
+-     * @param[in]  aHex        A pointer to the hex string.
+-     * @param[out] aBin        A pointer to where the binary representation is placed.
+-     * @param[in]  aBinLength  Maximum length of the binary representation.
+-     *
+-     * @returns The number of bytes in the binary representation.
+-     */
+-    int Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength);
++private:
++    static void ULoopFDHandler(uloop_fd *aFd, unsigned int aFlags);
+ 
+-    /**
+-     * This method output bytes into char*.
+-     *
+-     * @param[in]  aBytes   A pointer to the bytes need to be convert.
+-     * @param[in]  aLength  The length of the bytes.
+-     * @param[out] aOutput  A pointer to the char* string.
+-     */
+-    void OutputBytes(const uint8_t *aBytes, uint8_t aLength, char *aOutput);
++    std::set<uloop_fd *> mFds;
+ 
+-    /**
+-     * This method append result in message passed to ubus.
+-     *
+-     * @param[in] aError    The error type of the message.
+-     * @param[in] aContext  A pointer to the context.
+-     * @param[in] aRequest  A pointer to the request.
+-     */
+-    void AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest);
++    static UloopProcessor *sInstance;
+ };
+ 
+-class UBusAgent : public MainloopProcessor
++class UBusAgent : public UloopProcessor, private ubus_context, private uloop_timeout
+ {
+ public:
+     /**
+@@ -1083,25 +237,25 @@ public:
+      *
+      * @param[in] aHost  A reference to the Thread controller.
+      */
+-    UBusAgent(otbr::Host::RcpHost &aHost)
+-        : mHost(aHost)
+-        , mThreadMutex()
+-    {
+-    }
++    UBusAgent(otbr::Host::RcpHost &aHost);
++    virtual ~UBusAgent();
+ 
+     /**
+-     * This method initializes the UBus agent.
++     * Connects to ubus and publishes OTBR objects.
+      */
+     void Init(void);
+ 
+-    void Update(MainloopContext &aMainloop) override;
+-    void Process(const MainloopContext &aMainloop) override;
+-
+ private:
+-    static void UbusServerRun(void) { otbr::ubus::UbusServer::GetInstance().InstallUbusObject(); }
++    ubus_context  &Context() { return *this; }
++    uloop_timeout &ReconnectTimer() { return *this; }
++
++    void OnConnectionLost();
++    void OnReconnectTimer();
++
++    void UbusConnected();
++    void AttemptReconnection();
+ 
+-    otbr::Host::RcpHost &mHost;
+-    std::mutex           mThreadMutex;
++    UbusServer mServer;
+ };
+ } // namespace ubus
+ } // namespace otbr
