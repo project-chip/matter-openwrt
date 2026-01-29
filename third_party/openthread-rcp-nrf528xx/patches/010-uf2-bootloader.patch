@@ -1,0 +1,123 @@
+commit 5fa897db7870c86047ee9d29021434180c05f171
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Wed Jan 28 16:58:58 2026 +1300
+
+    Add support for UF2 boot loader with "1200 baud touch" reset
+
+diff --git a/src/nrf52840/nrf52840.cmake b/src/nrf52840/nrf52840.cmake
+index 85226e1..ad68d48 100644
+--- a/src/nrf52840/nrf52840.cmake
++++ b/src/nrf52840/nrf52840.cmake
+@@ -30,6 +30,9 @@ option(OT_BOOTLOADER "OT nrf bootloader type")
+ if(OT_BOOTLOADER STREQUAL "USB")
+     list(APPEND OT_PLATFORM_DEFINES "APP_USBD_NRF_DFU_TRIGGER_ENABLED=1")
+     set(LD_FILE "${CMAKE_CURRENT_SOURCE_DIR}/nrf52840/nrf52840_bootloader_usb.ld")
++elseif(OT_BOOTLOADER STREQUAL "UF2")
++    list(APPEND OT_PLATFORM_DEFINES "UF2_BOOTLOADER_ENABLED=1")
++    set(LD_FILE "${CMAKE_CURRENT_SOURCE_DIR}/nrf52840/nrf52840_bootloader_usb.ld")
+ elseif(OT_BOOTLOADER STREQUAL "UART")
+     set(LD_FILE "${CMAKE_CURRENT_SOURCE_DIR}/nrf52840/nrf52840_bootloader_uart.ld")
+ elseif(OT_BOOTLOADER STREQUAL "BLE")
+@@ -37,6 +40,9 @@ elseif(OT_BOOTLOADER STREQUAL "BLE")
+ else()
+     set(LD_FILE "${CMAKE_CURRENT_SOURCE_DIR}/nrf52840/nrf52840.ld")
+ endif()
++if(NOT OT_BOOTLOADER STREQUAL "UF2")
++    list(APPEND OT_PLATFORM_DEFINES "CONFIG_GPIO_AS_PINRESET")
++endif()
+ 
+ list(APPEND OT_PLATFORM_DEFINES
+     "OPENTHREAD_CORE_CONFIG_PLATFORM_CHECK_FILE=\"openthread-core-nrf52840-config-check.h\""
+@@ -66,7 +72,6 @@ list(APPEND OT_PUBLIC_INCLUDES "${PROJECT_SOURCE_DIR}/third_party/NordicSemicond
+ set(OT_PUBLIC_INCLUDES ${OT_PUBLIC_INCLUDES} PARENT_SCOPE)
+ 
+ set(COMM_FLAGS
+-    -DCONFIG_GPIO_AS_PINRESET
+     -DNRF52840_XXAA
+     -DUSE_APP_CONFIG=1
+     -Wno-unused-parameter
+diff --git a/src/src/transport/usb-cdc-uart.c b/src/src/transport/usb-cdc-uart.c
+index 5bcb091..7640a3b 100644
+--- a/src/src/transport/usb-cdc-uart.c
++++ b/src/src/transport/usb-cdc-uart.c
+@@ -60,6 +60,10 @@
+ #include "nrf_drv_power.h"
+ #include "class/cdc/acm/app_usbd_cdc_acm.h"
+ 
++#if defined(UF2_BOOTLOADER_ENABLED) && UF2_BOOTLOADER_ENABLED
++#include "hal/nrf_power.h"
++#endif
++
+ #if (USB_CDC_AS_SERIAL_TRANSPORT == 1)
+ 
+ static void cdcAcmUserEventHandler(app_usbd_class_inst_t const *aInstance, app_usbd_cdc_acm_user_event_t aEvent);
+@@ -260,6 +264,30 @@ static void processTransmit(void)
+     }
+ }
+ 
++#if defined(UF2_BOOTLOADER_ENABLED) && UF2_BOOTLOADER_ENABLED
++// Magic value to write to GPREGRET to trigger UF2 bootloader mode.
++#ifndef UF2_BOOTLOADER_GPREGRET_VALUE
++#define UF2_BOOTLOADER_GPREGRET_VALUE 0x57
++#endif
++
++static void checkUf2BootloaderTrigger(void)
++{
++    // Detect 1200 baud touch: reset to bootloader when baud rate changes to 1200
++    static uint32_t sPrevBaudrate = 0;
++    uint32_t        baudrate      = uint32_decode(sAppCdcAcm.specific.p_data->ctx.line_coding.dwDTERate);
++
++    if (baudrate != sPrevBaudrate)
++    {
++        sPrevBaudrate = baudrate;
++        if (baudrate == 1200)
++        {
++            nrf_power_gpregret_set(UF2_BOOTLOADER_GPREGRET_VALUE);
++            NVIC_SystemReset();
++        }
++    }
++}
++#endif // UF2_BOOTLOADER_ENABLED
++
+ void nrf5UartInit(void)
+ {
+     static const app_usbd_config_t usbdConfig = {
+@@ -286,6 +314,15 @@ void nrf5UartInit(void)
+     ret = app_usbd_power_events_enable();
+     assert(ret == NRF_SUCCESS);
+ 
++#if defined(UF2_BOOTLOADER_ENABLED) && UF2_BOOTLOADER_ENABLED
++    // Workaround: When transitioning from UF2 bootloader after flashing,
++    // APP_USBD_EVT_POWER_DETECTED won't fire since VBUS will stay detected during the soft reset.
++    if (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk)
++    {
++        usbdUserEventHandler(APP_USBD_EVT_POWER_DETECTED);
++    }
++#endif
++
+     OT_UNUSED_VARIABLE(ret);
+ }
+ 
+@@ -324,6 +361,10 @@ void nrf5UartProcess(void)
+     processConnection();
+     processReceive();
+     processTransmit();
++
++#if defined(UF2_BOOTLOADER_ENABLED) && UF2_BOOTLOADER_ENABLED
++    checkUf2BootloaderTrigger();
++#endif
+ }
+ 
+ otError otPlatUartEnable(void)
+diff --git a/third_party/NordicSemiconductor/CMakeLists.txt b/third_party/NordicSemiconductor/CMakeLists.txt
+index fa99d44..300e825 100644
+--- a/third_party/NordicSemiconductor/CMakeLists.txt
++++ b/third_party/NordicSemiconductor/CMakeLists.txt
+@@ -77,7 +77,6 @@ set(COMMON_FLAG
+     -DSPIS0_ENABLED=1
+     -DNRFX_SPIS_ENABLED=1
+     -DNRFX_SPIS0_ENABLED=1
+-    -DCONFIG_GPIO_AS_PINRESET
+     -DENABLE_FEM=1
+     -DUSE_APP_CONFIG=1
+ )

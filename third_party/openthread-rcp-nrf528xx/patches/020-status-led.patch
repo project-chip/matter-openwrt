@@ -1,0 +1,205 @@
+commit b55da5a120d01b19ec9f17ea3873f2fa9c674510
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Thu Jan 29 13:01:03 2026 +1300
+
+    Add basic support for an RGB status LED
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index fffb99b..8d2b455 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -39,6 +39,11 @@ else()
+     endif()
+ endif()
+ 
++option(OT_STATUS_LED_PINS "Status LED pin configuration (R,G,B)" "")
++if(OT_STATUS_LED_PINS)
++    list(APPEND OT_PLATFORM_DEFINES "STATUS_LED_PINS=${OT_STATUS_LED_PINS}")
++endif()
++
+ set(NRF_COMM_SOURCES
+     src/alarm.c
+     src/crypto.c
+@@ -49,6 +54,7 @@ set(NRF_COMM_SOURCES
+     src/logging.c
+     src/misc.c
+     src/radio.c
++    src/status_led.c
+     src/system.c
+     src/temp.c
+ )
+diff --git a/src/src/radio.c b/src/src/radio.c
+index a626f68..0490d99 100644
+--- a/src/src/radio.c
++++ b/src/src/radio.c
+@@ -56,6 +56,7 @@
+ #include "openthread-system.h"
+ #include "platform-fem.h"
+ #include "platform-nrf5.h"
++#include "status_led.h"
+ 
+ #include <nrf.h>
+ #include <nrf_802154.h>
+@@ -446,6 +447,7 @@ otError otPlatRadioEnable(otInstance *aInstance)
+     {
+         sDisabled = false;
+         error     = OT_ERROR_NONE;
++        nrf5SetStatusLed(STATUS_COLOR_RADIO_ENABLED);
+     }
+     else
+     {
+@@ -464,6 +466,7 @@ otError otPlatRadioDisable(otInstance *aInstance)
+                     error = OT_ERROR_INVALID_STATE);
+ 
+     sDisabled = true;
++    nrf5SetStatusLed(STATUS_COLOR_RADIO_DISABLED);
+ 
+ exit:
+     return error;
+diff --git a/src/src/status_led.c b/src/src/status_led.c
+new file mode 100644
+index 0000000..f25afce
+--- /dev/null
++++ b/src/src/status_led.c
+@@ -0,0 +1,76 @@
++
++#include "status_led.h"
++
++#ifdef STATUS_LED_PINS
++
++#include <nrf.h>
++#include <hal/nrf_gpio.h>
++#include <hal/nrf_pwm.h>
++
++// Default PWM configuration
++#ifndef STATUS_LED_PWM
++#define STATUS_LED_PWM NRF_PWM0
++#endif
++#ifndef STATUS_LED_PWM_FREQUENCY
++#define STATUS_LED_PWM_FREQUENCY NRF_PWM_CLK_4MHz
++#endif
++
++// Extract a pin from a pin map tuple
++#define SELECT_GPIO_PIN(i, ...)  SELECT_GPIO_PIN_##i(__VA_ARGS__)
++#define SELECT_GPIO_PIN_0(p1, ...)   NRF_GPIO_PIN_MAP p1
++#define SELECT_GPIO_PIN_1(p1, p2, ...) NRF_GPIO_PIN_MAP p2
++#define SELECT_GPIO_PIN_2(p1, p2, p3, ...) NRF_GPIO_PIN_MAP p3
++
++static inline uint16_t srgbToLinear(uint8_t c)
++{
++    return (c < 11) ? c / 3 : 3 + ((c - 11) * (c - 11) * 10) / 593;
++}
++
++void nrf5SetStatusLed(int color)
++{
++    // PWM sequence data, must be in RAM for DMA access
++    static nrf_pwm_values_individual_t pwm_values = { 0 };
++    static nrf_pwm_sequence_t const pwm_seq = {
++        .values.p_individual = &pwm_values,
++        .length              = NRF_PWM_VALUES_LENGTH(pwm_values),
++        .repeats             = 0,
++        .end_delay           = 0
++    };
++
++    static bool initialized = false;
++    if (!initialized)
++    {
++        // Configure pins for output and initialize to high (LEDs are active low)
++        uint32_t pins[] = {
++            SELECT_GPIO_PIN(0, STATUS_LED_PINS), // R
++            SELECT_GPIO_PIN(1, STATUS_LED_PINS), // G
++            SELECT_GPIO_PIN(2, STATUS_LED_PINS), // B
++            NRF_PWM_PIN_NOT_CONNECTED
++        };
++        for (int i=0; i<3; i++)
++        {
++            nrf_gpio_pin_set(pins[i]);
++            nrf_gpio_cfg_output(pins[i]);
++        }
++
++        // Configure PWM for 10 bit range, looping disabled (last duty cycle will be held)
++        nrf_pwm_disable(STATUS_LED_PWM);
++        nrf_pwm_pins_set(STATUS_LED_PWM, pins);
++        nrf_pwm_configure(STATUS_LED_PWM, STATUS_LED_PWM_FREQUENCY, NRF_PWM_MODE_UP, 1023);
++        nrf_pwm_decoder_set(STATUS_LED_PWM, NRF_PWM_LOAD_INDIVIDUAL, NRF_PWM_STEP_AUTO);
++        nrf_pwm_loop_set(STATUS_LED_PWM, 0);
++        nrf_pwm_shorts_set(STATUS_LED_PWM, 0);
++        nrf_pwm_sequence_set(STATUS_LED_PWM, 0, &pwm_seq);
++        nrf_pwm_enable(STATUS_LED_PWM);
++
++        initialized = true;
++    }
++
++    // MSB controls polarity, 0 = RisingEdge aligns with active low LEDs
++    pwm_values.channel_0 = srgbToLinear((color >> 16) & 0xff); // R
++    pwm_values.channel_1 = srgbToLinear((color >>  8) & 0xff); // G
++    pwm_values.channel_2 = srgbToLinear((color >>  0) & 0xff); // B
++    nrf_pwm_task_trigger(STATUS_LED_PWM, NRF_PWM_TASK_SEQSTART0);
++}
++
++#endif // STATUS_LED_PINS
+diff --git a/src/src/status_led.h b/src/src/status_led.h
+new file mode 100644
+index 0000000..2ec7cda
+--- /dev/null
++++ b/src/src/status_led.h
+@@ -0,0 +1,30 @@
++#ifndef STATUS_LED_H_
++#define STATUS_LED_H_
++
++#include <stdint.h>
++
++#define STATUS_COLOR_INITIALIZING   0xffcc00
++#define STATUS_COLOR_RADIO_DISABLED 0x000044
++#define STATUS_COLOR_RADIO_ENABLED  0x0000ff
++
++#ifdef STATUS_LED_PINS
++
++/**
++ * Set the status RGB LED color, in 0xRRGGBB format (e.g. 0xFF8000 is orange).
++ * Uses hardware PWM for smooth color control with 8-bit resolution per channel.
++ *
++ * To enable support, STATUS_LED_PINS needs to be defined to a triple of
++ * (port,pin) pairs (see NRF_GPIO_PIN_MAP) at compile time, e.g.
++ * -DSTATUS_LED_PINS="(0,23),(0,22),(0,24)", assumed to be active low.
++ * 
++ * STATUS_LED_PWM and STATUS_LED_PWM_FREQUENCY can be used to configure the
++ * PWM instance and frequence; the defaults are NRF_PWM0 and NRF_PWM_CLK_4MHz.
++ */
++void nrf5SetStatusLed(int color);
++
++#else
++
++static inline void nrf5SetStatusLed(int color) { (void)color; }
++
++#endif // STATUS_LED_PINS
++#endif // STATUS_LED_H_
+diff --git a/src/src/system.c b/src/src/system.c
+index 025bf4e..cd1582b 100644
+--- a/src/src/system.c
++++ b/src/src/system.c
+@@ -41,6 +41,7 @@
+ #include "platform-fem.h"
+ #include "platform-nrf5-transport.h"
+ #include "platform-nrf5.h"
++#include "status_led.h"
+ #include <nrf.h>
+ #include <nrf_drv_clock.h>
+ 
+@@ -72,6 +73,8 @@ void otSysInit(int argc, char *argv[])
+         otSysDeinit();
+     }
+ 
++    nrf5SetStatusLed(STATUS_COLOR_INITIALIZING);
++
+ #if ((!SOFTDEVICE_PRESENT) && (NRF52840_XXAA))
+     // Enable I-code cache
+     NRF_NVMC->ICACHECNF = NVMC_ICACHECNF_CACHEEN_Enabled;
+@@ -104,6 +107,7 @@ void otSysInit(int argc, char *argv[])
+     nrf5FemInit();
+     nrf5CryptoInit();
+ 
++    nrf5SetStatusLed(STATUS_COLOR_RADIO_DISABLED);
+     gPlatformPseudoResetWasRequested = false;
+ }
+ 

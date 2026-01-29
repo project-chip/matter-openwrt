@@ -1,0 +1,74 @@
+#!/bin/sh /etc/rc.common
+
+# Copyright (c) 2026 Project CHIP Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+START=90
+
+USE_PROCD=1
+AGENT_PROG=/usr/sbin/otbr-agent
+RCP_PROG=/usr/sbin/otbr-rcp
+
+validate_section_otbr()
+{
+    uci_load_validate otbr-agent otbr-agent "$1" "$2" \
+        'thread_if_name:string' \
+        'infra_if_name:string' \
+        'uart_device:string:any' \
+        'uart_baudrate:uinteger:0' \
+        'uart_flow_control:bool:1' \
+        'rcp_hotplug:bool:1' \
+        'rcp_firmware_update:bool:1'
+}
+
+otbr_instance()
+{
+    local cfg="$1"
+    if [ "$2" != 0 ]; then
+        echo "validation failed"
+        return 1
+    fi
+    if [ -z "$infra_if_name" ]; then
+        echo "missing infra_if_name"
+        return 1
+    fi
+
+    local radio_url
+    if [ "${uart_device#/dev/}" != "${uart_device}" ]; then
+        # Directly run otbr-agent with the specified /dev/* device
+        set -- "$AGENT_PROG"
+        radio_url="spinel+hdlc+uart://${uart_device}"
+    else
+        # Use the otbr-rcp wrapper to locate the device
+        set -- "$RCP_PROG"
+        [ "$rcp_hotplug" -eq 0 ] || set -- "$@" --wait
+        [ "$rcp_firmware_update" -eq 0 ] || set -- "$@" --update
+        set -- "$@" "$uart_device" --
+        radio_url="%rcpurl%"
+    fi
+    radio_url="${radio_url}?uart-exclusive"
+    [ "$uart_baudrate" -eq 0 ] || radio_url="${radio_url}&uart-baudrate=${uart_baudrate}"
+    [ "$uart_flow_control" -eq 0 ] || radio_url="${radio_url}&uart-flow-control"
+
+    procd_open_instance
+    procd_set_param command "$@" -I "${thread_if_name:-$cfg}" -B "$infra_if_name" "${radio_url}" "trel://${infra_if_name}"
+    procd_set_param respawn
+    procd_close_instance
+}
+
+start_service()
+{
+    config_load otbr-agent
+    config_foreach validate_section_otbr otbr-agent otbr_instance
+}

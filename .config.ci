@@ -6,3 +6,4 @@ CONFIG_PACKAGE_matter-netman-mbedtls=m
 CONFIG_PACKAGE_matter-netman-openssl=m
 CONFIG_PACKAGE_mdnsresponder=m
 CONFIG_PACKAGE_openthread-br=m
+CONFIG_PACKAGE_openthread-rcp-nrf52840-mdk=m

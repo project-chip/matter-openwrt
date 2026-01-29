@@ -1,0 +1,38 @@
+commit 2fc05d1b37a7cbe9b66e422d5bba58a048d8be62
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Tue Feb 10 16:03:00 2026 +1300
+
+    [posix] Optionally name the posix settings file based on the interface
+
+    ... instead of the default <port offset>_<eui> naming. This allows the
+    settings file to remain stable when replacing the RCP dongle.
+
+diff --git a/third_party/openthread/repo/src/posix/platform/settings.cpp b/third_party/openthread/repo/src/posix/platform/settings.cpp
+index 8faef601d..132df3808 100644
+--- a/third_party/openthread/repo/src/posix/platform/settings.cpp
++++ b/third_party/openthread/repo/src/posix/platform/settings.cpp
+@@ -84,13 +84,22 @@ static otError settingsFileInit(otInstance *aInstance)
+ {
+     static constexpr size_t kMaxFileBaseNameSize = 32;
+     char                    fileBaseName[kMaxFileBaseNameSize];
+-    const char             *offset = getenv("PORT_OFFSET");
+-    uint64_t                nodeId;
+
++#if defined(OPENTHREAD_POSIX_CONFIG_SETTINGS_USE_INTERFACE_NAME) && OPENTHREAD_POSIX_CONFIG_SETTINGS_USE_INTERFACE_NAME
++    // Use interface name as the settings file base name
++    OT_UNUSED_VARIABLE(aInstance);
++    const char *netifName = otSysGetThreadNetifName();
++    VerifyOrDie(netifName != nullptr && strlen(netifName) > 0, OT_EXIT_FAILURE);
++    snprintf(fileBaseName, sizeof(fileBaseName), "%s", netifName);
++#else
++    // Use port offset and EUI-64 as the settings file base name
++    const char *offset = getenv("PORT_OFFSET");
++    uint64_t    nodeId;
+     otPlatRadioGetIeeeEui64(aInstance, reinterpret_cast<uint8_t *>(&nodeId));
+     nodeId = ot::BigEndian::HostSwap64(nodeId);
+
+     snprintf(fileBaseName, sizeof(fileBaseName), "%s_%" PRIx64, offset == nullptr ? "0" : offset, nodeId);
++#endif
+     VerifyOrDie(strlen(fileBaseName) < kMaxFileBaseNameSize, OT_EXIT_FAILURE);
+
+     return sSettingsFile.Init(fileBaseName);

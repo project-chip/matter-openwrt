@@ -1,0 +1,23 @@
+commit 42f28873fb6dfaa8e655eb342f1f299de44cf2f3
+Author: Karsten Sperling <ksperling@apple.com>
+Date:   Tue Feb 10 17:25:52 2026 +1300
+
+    [posix] Handle RCP disconnection (EOF from read())
+
+diff --git a/third_party/openthread/repo/src/posix/platform/hdlc_interface.cpp b/third_party/openthread/repo/src/posix/platform/hdlc_interface.cpp
+index bfedc9858..2df744533 100644
+--- a/third_party/openthread/repo/src/posix/platform/hdlc_interface.cpp
++++ b/third_party/openthread/repo/src/posix/platform/hdlc_interface.cpp
+@@ -202,7 +202,11 @@ void HdlcInterface::Read(void)
+     {
+         Decode(buffer, static_cast<uint16_t>(rval));
+     }
+-    else if ((rval < 0) && (errno != EAGAIN) && (errno != EINTR))
++    else if (rval == 0)
++    {
++        DieNowWithMessage("RCP device disconnected (EOF)", OT_EXIT_FAILURE);
++    }
++    else if ((errno != EAGAIN) && (errno != EINTR))
+     {
+         DieNow(OT_EXIT_ERROR_ERRNO);
+     }

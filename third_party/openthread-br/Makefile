@@ -29,7 +29,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=openthread-br
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git-with-metadata
 PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
@@ -119,7 +119,7 @@ endef
 
 # Disable firewall integration due to https://github.com/openthread/ot-br-posix/issues/1675
 CMAKE_OPTIONS+= \
-	-DOTBR_GIT_VERSION=$(call GitWithMetadata/resolve,OTBR_GIT_VERSION) \
+	-DOTBR_GIT_VERSION=$(call GitWithMetadata/resolve,OTBR_GIT_VERSION)$(if $(PKG_RELEASE),-r$(PKG_RELEASE)) \
 	-DOT_PACKAGE_VERSION=$(call GitWithMetadata/resolve,OT_GIT_VERSION) \
 	-DCMAKE_BUILD_TYPE=$(if $(CONFIG_DEBUG),Debug,Release) \
 	-DCMAKE_INSTALL_PREFIX=/usr \
@@ -134,9 +134,10 @@ CMAKE_OPTIONS+= \
 	-DOT_POSIX_SETTINGS_PATH=\"/etc/openthread\" \
 	-DOT_READLINE=OFF
 
-# OpenWrt uses /var/run instead of /run
 TARGET_CFLAGS+= \
 	-DOPENTHREAD_POSIX_CONFIG_DAEMON_SOCKET_BASENAME=\\\"/var/run/openthread-%s\\\" \
+	-DOPENTHREAD_POSIX_CONFIG_SETTINGS_USE_INTERFACE_NAME=1 \
+	-DOPENTHREAD_POSIX_CONFIG_TMP_STORAGE_ENABLE=0 \
 	-DOPENTHREAD_CONFIG_LOG_PREPEND_UPTIME=0 \
 	-DOPENTHREAD_CONFIG_LOG_PREPEND_LEVEL=0
 
@@ -151,18 +152,18 @@ CMAKE_OPTIONS+= -DOTBR_MDNS=mDNSResponder
 endif
 
 define Package/openthread-br/install
-	$(INSTALL_DIR) $(1)/usr/sbin
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config $(1)/etc/uci-defaults $(1)/etc/hotplug.d/usb
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/sbin/otbr-agent $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/sbin/ot-ctl $(1)/usr/sbin
-
-	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/etc/init.d/* $(1)/etc/init.d
-
-	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) $(PKG_INSTALL_DIR)/etc/config/* $(1)/etc/config
+	$(INSTALL_BIN) ./files/otbr-rcp $(1)/usr/sbin
+	$(INSTALL_BIN) ./files/otbr-agent.init $(1)/etc/init.d/otbr-agent
+	$(INSTALL_CONF) ./files/otbr-agent.config $(1)/etc/config/otbr-agent
+	$(INSTALL_DATA) ./files/otbr-agent.defaults $(1)/etc/uci-defaults/95-otbr-agent
+	$(INSTALL_DATA) ./files/otbr-rcp.hotplug $(1)/etc/hotplug.d/usb/50-otbr-rcp
 endef
 
 define Package/openthread-br/conffiles
+/etc/config/otbr-agent
 /etc/openthread/
 endef
 
