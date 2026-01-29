@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Project CHIP Authors
+# Copyright (c) 2023-2026 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ define Package/gn
   CATEGORY:=Development
   TITLE:=gn
   URL:=https://gn.googlesource.com/gn
+  BUILDONLY:=1
 endef
 
 define Package/gn/description

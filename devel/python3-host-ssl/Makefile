@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Project CHIP Authors
+# Copyright (c) 2025-2026 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ define Package/python3-host-ssl
   SECTION:=lang
   CATEGORY:=Languages
   TITLE:=Python3 host package SSL configuration
+  BUILDONLY:=1
 endef
 
 define Package/python3-host-ssl/description
