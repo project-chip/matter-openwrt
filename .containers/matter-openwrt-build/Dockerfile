@@ -7,7 +7,7 @@ ARG SRC_PACKAGES="glib2 openssl ubus avahi"
 ARG CFG_PACKAGES="glib2 libopenssl libubus libavahi-client"
 
 RUN set -x && \
-    grep -w 'base\|packages' feeds.conf.default > feeds.conf && \
+    grep -w 'base\|packages' feeds.conf.default | sed -e 's|git.openwrt.org/[^/]*|github.com/openwrt|' >feeds.conf && \
     ./scripts/feeds update -a && \
     ./scripts/feeds install ${SRC_PACKAGES} && \
     echo "CONFIG_ALL=n" >.config && \
