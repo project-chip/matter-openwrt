@@ -73,7 +73,7 @@ struct uf2_block {
     uint32_t payload_size;
     uint32_t block_no;
     uint32_t num_blocks;
-    uint32_t file_size;
+    uint32_t file_size_or_family_id;
     uint8_t data[476];
     uint32_t magic_end;
 } __attribute__((packed));
@@ -112,7 +112,7 @@ static int convert(uint32_t family, uint32_t base, char const *bin, char const *
     block.magic_start1 = htole32(0x9E5D5157);
     block.magic_end = htole32(0x0AB16F30);
     block.flags = htole32(0x00002000); // Family ID Present
-    block.file_size = htole32(family);
+    block.file_size_or_family_id = htole32(family);
     block.num_blocks = htole32(num_blocks);
     block.payload_size = htole32(chunk_size); // same for all chunks (may implicitly pad the last chunk)
 
