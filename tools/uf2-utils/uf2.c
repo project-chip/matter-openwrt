@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <endian.h>
 #include <fcntl.h>
@@ -28,10 +29,19 @@ static void log_error(char const *what) {
     fprintf(stderr, "%s failed: %s\n", what, strerror(errno));
 }
 
+// Parse a uint32_t in decimal, octal, or hex
 static int parse_uint32(char const *str, uint32_t *out) {
+    if (!isdigit(*str)) {
+        return 1;
+    }
+    errno = 0;
     char *endptr;
-    *out = strtoul(str, &endptr, 0);
-    return *endptr != '\0';
+    unsigned long value = strtoul(str, &endptr, 0);
+    if (errno != 0 || *endptr != '\0' || value > UINT32_MAX) {
+        return 1;
+    }
+    *out = value;
+    return 0;
 }
 
 // Perform a "1200 baud touch" to reset the given device
