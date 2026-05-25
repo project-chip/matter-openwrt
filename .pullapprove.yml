@@ -15,9 +15,6 @@ overrides:
   ############################################################
   #  Draft PRs
   ############################################################
-  - if: "draft or 'WIP' in title"
-    status: pending
-    explanation: "PR is draft, pending review"
   - if: "draft"
     status: pending
     explanation: "PR is draft, pending review"
@@ -32,16 +29,9 @@ overrides:
   ############################################################
   #  Conditions to Skip Review
   ############################################################
-  - if: "base.ref != 'master'"
+  - if: "base.ref != 'main'"
     status: success
-    explanation: "Review not required unless merging to master"
-
-  ############################################################
-  #  Required status checks
-  ############################################################
-  - if: "'*restyle*' not in statuses.successful"
-    status: failure
-    explanation: "Style must be inline before reviewing can be complete"
+    explanation: "Review not required unless merging to main"
 
   ############################################################
   #  Require Issues
@@ -57,6 +47,13 @@ overrides:
   - if: "'fast track' in labels"
     status: success
     explanation: "PR has been fast tracked, bypassing reviews"
+
+  ############################################################
+  #  Approved by matter-sdk-maintainers
+  ############################################################
+  - if: "'sdk-maintainer-approved' in labels and len(groups.approved.include('sdk-maintainers')) >= 1"
+    status: success
+    explanation: "Approved by SDK maintainer and label is set."
 
 ############################################################
 #  Notifications
@@ -87,7 +84,7 @@ groups:
     reviewers:
       teams: [reviewers-amazon]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-apple:
     type: optional
     conditions:
@@ -95,7 +92,7 @@ groups:
     reviewers:
       teams: [reviewers-apple]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-bosch:
     type: optional
     conditions:
@@ -103,7 +100,7 @@ groups:
     reviewers:
       teams: [reviewers-bosch]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-comcast:
     type: optional
     conditions:
@@ -111,7 +108,15 @@ groups:
     reviewers:
       teams: [reviewers-comcast]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
+  shared-reviewers-cablelabs:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [reviewers-cablelabs]
+    reviews:
+      request: 0 # Do not auto-add
   shared-reviewers-dyson:
     type: optional
     conditions:
@@ -119,7 +124,7 @@ groups:
     reviewers:
       teams: [reviewers-dyson]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-espressif:
     type: optional
     conditions:
@@ -127,7 +132,7 @@ groups:
     reviewers:
       teams: [reviewers-espressif]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-google:
     type: optional
     conditions:
@@ -135,7 +140,23 @@ groups:
     reviewers:
       teams: [reviewers-google]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
+  shared-reviewers-geo:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [reviewers-geo]
+    reviews:
+      request: 0 # Do not auto-add
+  shared-reviewers-grundfos:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [reviewers-grundfos]
+    reviews:
+      request: 0 # Do not auto-add
   shared-reviewers-irobot:
     type: optional
     conditions:
@@ -143,7 +164,7 @@ groups:
     reviewers:
       teams: [reviewers-irobot]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-lg:
     type: optional
     conditions:
@@ -151,7 +172,7 @@ groups:
     reviewers:
       teams: [reviewers-lg]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-logitech:
     type: optional
     conditions:
@@ -167,7 +188,15 @@ groups:
     reviewers:
       teams: [reviewers-nordic]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
+  shared-reviewers-nxp:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [reviewers-nxp]
+    reviews:
+      request: 0 # Do not auto-add
   shared-reviewers-samsung:
     type: optional
     conditions:
@@ -175,7 +204,15 @@ groups:
     reviewers:
       teams: [reviewers-samsung]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
+  shared-reviewers-eve:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [reviewers-eve]
+    reviews:
+      request: 0 # Do not auto-add
   # shared-reviewers-signify disabled for now, because the reviewers-signify
   # team is empty and pullapprove seems to mis-handle that badly and treats
   # _all_ reviewers as being in this group.
@@ -189,7 +226,7 @@ groups:
   #     reviewers:
   #         teams: [reviewers-signify]
   #     reviews:
-  #         request: 10
+  #         request: 0 # Do not auto-add
   shared-reviewers-silabs:
     type: optional
     conditions:
@@ -197,7 +234,7 @@ groups:
     reviewers:
       teams: [reviewers-silabs]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-somfy:
     type: optional
     conditions:
@@ -205,7 +242,7 @@ groups:
     reviewers:
       teams: [reviewers-somfy]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-tcl:
     type: optional
     conditions:
@@ -213,7 +250,7 @@ groups:
     reviewers:
       teams: [reviewers-tcl]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
   shared-reviewers-qorvo:
     type: optional
     conditions:
@@ -221,7 +258,25 @@ groups:
     reviewers:
       teams: [reviewers-qorvo]
     reviews:
-      request: 10
+      request: 0 # Do not auto-add
+  shared-reviewers-velux:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [reviewers-velux]
+    reviews:
+      request: 0 # Do not auto-add
+
+  sdk-maintainers:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [matter-sdk-maintainers]
+    reviews:
+      request: 0 # Do not auto-add
+      author_value: 1
 
   ############################################################
   #  Base Required Reviewers
