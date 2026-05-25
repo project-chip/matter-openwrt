@@ -40,6 +40,10 @@ CONFIG_MBEDTLS_CCM_C=y
 Note that this requires the mbedtls package from the OpenWrt core to be rebuilt with the MBEDTLS_CCM_C option enabled.
 Alternatively, the matter-netman-openssl variant of the package can be used which depends on OpenSSL.
 
+## Contributing
+
+Want to contribute? Great! Please refer to the [Contributing to Matter](https://github.com/project-chip/connectedhomeip/blob/master/CONTRIBUTING.md) guide in the main Matter SDK repository for details.
+
 ## License
 
 Matter-OpenWrt is released under the [Apache 2.0 license](./LICENSE).
