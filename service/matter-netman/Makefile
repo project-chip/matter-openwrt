@@ -18,7 +18,6 @@ PKG_NAME:=matter-netman
 PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/project-chip/connectedhomeip.git
 PKG_SOURCE_PROTO:=git
-PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 PKG_SOURCE_SUBMODULES:=\
   third_party/pigweed/repo \
   third_party/jsoncpp/repo \
