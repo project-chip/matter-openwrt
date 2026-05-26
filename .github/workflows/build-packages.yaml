@@ -11,6 +11,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      - name: Prepare log directory
+        run: |
+          mkdir -p ${{ runner.temp }}/logs
+          chmod 0777 ${{ runner.temp }}/logs
+
       # Run only the build step in the container rather than the whole job, because the UID of the
       # buildbot user (1000) that owns the OpenWrt SDK files in /builder doesn't match the UID of
       # the GitHub runner user (1001), causing file system permission issues.
@@ -18,7 +23,7 @@ jobs:
         uses: addnab/docker-run-action@v3
         with:
           image: ghcr.io/project-chip/matter-openwrt-build:25.12.4
-          options: --volume ${{ github.workspace }}:/workspace
+          options: --volume ${{ github.workspace }}:/workspace --volume ${{ runner.temp }}/logs:/builder/logs
           shell: bash
           run: |
             set -x
@@ -40,3 +45,11 @@ jobs:
               echo "ERROR: Some packages failed to build: ${failed[*]}"
               exit 2
             fi
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs
+          path: ${{ runner.temp }}/logs
+          if-no-files-found: ignore
