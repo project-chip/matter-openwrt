@@ -32,7 +32,6 @@ PKG_NAME:=openthread-br
 PKG_RELEASE:=2
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git-with-metadata
-PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 
 PKG_SOURCE_DATE:=2025-10-29
 PKG_SOURCE_VERSION:=07fc9adf2afd6f697a92c54db922f575c7bcd28f
