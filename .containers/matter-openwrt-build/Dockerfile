@@ -9,10 +9,13 @@ ARG CFG_PACKAGES="glib2 libopenssl libubus libavahi-client"
 RUN set -x && \
     grep -w 'base\|packages' feeds.conf.default | sed -e 's|git.openwrt.org/[^/]*|github.com/openwrt|' >feeds.conf && \
     ./scripts/feeds update -a && \
-    ./scripts/feeds install ./scripts/feeds install $(echo "${SRC_PACKAGES}" | sed 's|/host||g') && \
+    ./scripts/feeds install $(echo "${SRC_PACKAGES}" | sed 's|/host||g') && \
     echo "CONFIG_ALL=n" >.config && \
     echo "CONFIG_AUTOREMOVE=n" >>.config && \
     echo "CONFIG_AUTOREBUILD=n" >>.config && \
     for pkg in ${CFG_PACKAGES}; do echo "CONFIG_PACKAGE_${pkg}=y"; done >>.config && \
+    : "Normalize timestamps to avoid spurious rebuilds due to Docker layer mtime truncation" && \
+    SDE=$(sed -n 's/^SOURCE_DATE_EPOCH:=//p' include/version.mk) && test -n "$SDE" && \
+    find .config feeds -exec touch -h -d "@$SDE" {} + && \
     make defconfig && \
     for pkg in ${SRC_PACKAGES}; do make -j "$(nproc)" "package/${pkg}/compile"; done
