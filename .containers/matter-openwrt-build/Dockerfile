@@ -3,13 +3,13 @@ FROM ghcr.io/openwrt/sdk:x86-generic-${OPENWRT_VERSION}
 LABEL org.opencontainers.image.description="Pre-warmed OpenWrt SDK"
 
 # Core packages to pre-build to speed up CI builds
-ARG SRC_PACKAGES="glib2 openssl ubus avahi"
+ARG SRC_PACKAGES="glib2 openssl ubus avahi python3/host"
 ARG CFG_PACKAGES="glib2 libopenssl libubus libavahi-client"
 
 RUN set -x && \
     grep -w 'base\|packages' feeds.conf.default | sed -e 's|git.openwrt.org/[^/]*|github.com/openwrt|' >feeds.conf && \
     ./scripts/feeds update -a && \
-    ./scripts/feeds install ${SRC_PACKAGES} && \
+    ./scripts/feeds install ${SRC_PACKAGES//\/host/} && \
     echo "CONFIG_ALL=n" >.config && \
     echo "CONFIG_AUTOREMOVE=n" >>.config && \
     echo "CONFIG_AUTOREBUILD=n" >>.config && \
