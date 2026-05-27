@@ -61,8 +61,10 @@ otbr_instance()
 	[ "$uart_baudrate" -eq 0 ] || radio_url="${radio_url}&uart-baudrate=${uart_baudrate}"
 	[ "$uart_flow_control" -eq 0 ] || radio_url="${radio_url}&uart-flow-control"
 
+	local model="$(jsonfilter -q -i /etc/board.json -e @.model.name)"
+
 	procd_open_instance
-	procd_set_param command "$@" -I "${thread_if_name:-$cfg}" -B "$infra_if_name" "${radio_url}" "trel://${infra_if_name}"
+	procd_set_param command "$@" -I "${thread_if_name:-$cfg}" -B "$infra_if_name" --model-name "${model:-BorderRouter}" "${radio_url}" "trel://${infra_if_name}"
 	procd_set_param respawn
 	procd_close_instance
 }

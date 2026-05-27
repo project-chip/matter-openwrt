@@ -1,0 +1,635 @@
+From 1f56fbac66f0d545a43c5f6f46c5eba78e57ddc5 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 2 Oct 2025 08:10:30 +1300
+Subject: [PATCH] Ubus: Move ubus / uloop integration onto the main thread
+
+This is a pre-requisite for sending ubus notifications based on Thread events
+or state changes in a thread-safe way. It also simplifies the integration
+overall and aligns with how the DBus integration is implemented.
+
+Also remove unused blobmsg_json dependency.
+---
+ src/agent/application.cpp       |  11 +-
+ src/openwrt/ubus/CMakeLists.txt |   2 -
+ src/openwrt/ubus/otubus.cpp     | 226 ++++++++++++++------------------
+ src/openwrt/ubus/otubus.hpp     |  72 +++++-----
+ 4 files changed, 145 insertions(+), 166 deletions(-)
+
+diff --git a/src/agent/application.cpp b/src/agent/application.cpp
+index fe2aa55b..751622c0 100644
+--- a/src/agent/application.cpp
++++ b/src/agent/application.cpp
+@@ -100,6 +100,11 @@ void Application::Init(const std::string &aRestListenAddress, int aRestListenPor
+ {
+     CoprocessorType type;
+ 
++    // Set up signal handlers before initializing other components.
++    signal(SIGTERM, HandleSignal); // allow quitting elegantly
++    signal(SIGINT, HandleSignal);  // ... also on SIGINT
++    signal(SIGPIPE, SIG_IGN);      // avoid exiting on SIGPIPE
++
+     mHost.Init();
+ 
+     type = mHost.GetCoprocessorType();
+@@ -173,12 +178,6 @@ otbrError Application::Run(void)
+     }
+ #endif
+ 
+-    // allow quitting elegantly
+-    signal(SIGTERM, HandleSignal);
+-
+-    // avoid exiting on SIGPIPE
+-    signal(SIGPIPE, SIG_IGN);
+-
+     while (!sShouldTerminate)
+     {
+         otbr::MainloopContext mainloop;
+diff --git a/src/openwrt/ubus/CMakeLists.txt b/src/openwrt/ubus/CMakeLists.txt
+index 9d0a086e..8e868f2b 100644
+--- a/src/openwrt/ubus/CMakeLists.txt
++++ b/src/openwrt/ubus/CMakeLists.txt
+@@ -35,6 +35,4 @@ target_link_libraries(otbr-ubus PRIVATE
+     openthread-posix
+     ubox
+     ubus
+-    blobmsg_json
+-    json-c
+ )
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 45b9ed4e..5d2724a8 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -34,23 +34,18 @@
+ 
+ #include "openwrt/ubus/otubus.hpp"
+ 
+-#include <mutex>
+-
+-#include <arpa/inet.h>
+-#include <sys/eventfd.h>
+-
+ #include <openthread/commissioner.h>
+ #include <openthread/thread.h>
+ #include <openthread/thread_ftd.h>
+ 
+ #include "common/logging.hpp"
++#include "common/time.hpp"
+ #include "host/rcp_host.hpp"
+ 
+ namespace otbr {
+ namespace ubus {
+ 
+ static UbusServer *sUbusServerInstance = nullptr;
+-static int         sUbusEfd            = -1;
+ static void       *sJsonUri            = nullptr;
+ static int         sBufNum;
+ 
+@@ -58,12 +53,10 @@ const static int PANID_LENGTH      = 10;
+ const static int XPANID_LENGTH     = 64;
+ const static int NETWORKKEY_LENGTH = 64;
+ 
+-UbusServer::UbusServer(Host::RcpHost *aHost, std::mutex *aMutex)
+-    : mIfFinishScan(false)
+-    , mContext(nullptr)
++UbusServer::UbusServer(Host::RcpHost *aHost)
++    : mContext(nullptr)
+     , mSockPath(nullptr)
+     , mHost(aHost)
+-    , mHostMutex(aMutex)
+     , mSecond(0)
+ {
+     memset(&mNetworkdataBuf, 0, sizeof(mNetworkdataBuf));
+@@ -78,9 +71,9 @@ UbusServer &UbusServer::GetInstance(void)
+     return *sUbusServerInstance;
+ }
+ 
+-void UbusServer::Initialize(Host::RcpHost *aHost, std::mutex *aMutex)
++void UbusServer::Initialize(Host::RcpHost *aHost)
+ {
+-    sUbusServerInstance = new UbusServer(aHost, aMutex);
++    sUbusServerInstance = new UbusServer(aHost);
+ }
+ 
+ enum
+@@ -223,20 +216,6 @@ static struct ubus_object otbr = {
+     n_methods : ARRAY_SIZE(otbrMethods),
+ };
+ 
+-void UbusServer::ProcessScan(void)
+-{
+-    otError  error        = OT_ERROR_NONE;
+-    uint32_t scanChannels = 0;
+-    uint16_t scanDuration = 0;
+-
+-    mHostMutex->lock();
+-    SuccessOrExit(error = otLinkActiveScan(mHost->GetInstance(), scanChannels, scanDuration,
+-                                           &UbusServer::HandleActiveScanResult, this));
+-exit:
+-    mHostMutex->unlock();
+-    return;
+-}
+-
+ void UbusServer::HandleActiveScanResult(otActiveScanResult *aResult, void *aContext)
+ {
+     static_cast<UbusServer *>(aContext)->HandleActiveScanResultDetail(aResult);
+@@ -267,28 +246,30 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+ 
+     if (aResult == nullptr)
+     {
+-        blobmsg_close_array(&mBuf, sJsonUri);
+-        mIfFinishScan = true;
++        blobmsg_close_array(&mScanBuf, mScanArray);
++        blobmsg_add_u16(&mScanBuf, "Error", OT_ERROR_NONE);
++        ubus_send_reply(mContext, &mScanRequest, mScanBuf.head);
++        ubus_complete_deferred_request(mContext, &mScanRequest, 0);
+         goto exit;
+     }
+ 
+-    jsonList = blobmsg_open_table(&mBuf, nullptr);
++    jsonList = blobmsg_open_table(&mScanBuf, nullptr);
+ 
+-    blobmsg_add_string(&mBuf, "NetworkName", aResult->mNetworkName.m8);
++    blobmsg_add_string(&mScanBuf, "NetworkName", aResult->mNetworkName.m8);
+ 
+     OutputBytes(aResult->mExtendedPanId.m8, OT_EXT_PAN_ID_SIZE, xpanidstring);
+-    blobmsg_add_string(&mBuf, "ExtendedPanId", xpanidstring);
++    blobmsg_add_string(&mScanBuf, "ExtendedPanId", xpanidstring);
+ 
+     sprintf(panidstring, "0x%04x", aResult->mPanId);
+-    blobmsg_add_string(&mBuf, "PanId", panidstring);
++    blobmsg_add_string(&mScanBuf, "PanId", panidstring);
+ 
+-    blobmsg_add_u32(&mBuf, "Channel", aResult->mChannel);
++    blobmsg_add_u32(&mScanBuf, "Channel", aResult->mChannel);
+ 
+-    blobmsg_add_u32(&mBuf, "Rssi", aResult->mRssi);
++    blobmsg_add_u32(&mScanBuf, "Rssi", aResult->mRssi);
+ 
+-    blobmsg_add_u32(&mBuf, "Lqi", aResult->mLqi);
++    blobmsg_add_u32(&mScanBuf, "Lqi", aResult->mLqi);
+ 
+-    blobmsg_close_table(&mBuf, jsonList);
++    blobmsg_close_table(&mScanBuf, jsonList);
+ 
+ exit:
+     return;
+@@ -313,31 +294,24 @@ int UbusServer::UbusScanHandlerDetail(struct ubus_context      *aContext,
+     OT_UNUSED_VARIABLE(aMethod);
+     OT_UNUSED_VARIABLE(aMsg);
+ 
+-    otError  error = OT_ERROR_NONE;
+-    uint64_t eventNum;
+-    ssize_t  retval;
+-
+-    blob_buf_init(&mBuf, 0);
+-    sJsonUri = blobmsg_open_array(&mBuf, "scan_list");
++    otError  error;
++    uint32_t scanChannels = 0;
++    uint16_t scanDuration = 0;
+ 
+-    mIfFinishScan = 0;
+-    sUbusServerInstance->ProcessScan();
++    // Note: This returns kErrorBusy if a scan is already in progress.
++    SuccessOrExit(error = otLinkActiveScan(mHost->GetInstance(), scanChannels, scanDuration,
++                                           &UbusServer::HandleActiveScanResult, this));
+ 
+-    eventNum = 1;
+-    retval   = write(sUbusEfd, &eventNum, sizeof(uint64_t));
+-    if (retval != sizeof(uint64_t))
+-    {
+-        error = OT_ERROR_FAILED;
+-        goto exit;
+-    }
++    ubus_defer_request(mContext, aRequest, &mScanRequest);
++    blob_buf_init(&mScanBuf, 0);
++    mScanArray = blobmsg_open_array(&mScanBuf, "scan_list");
+ 
+-    while (!mIfFinishScan)
++exit:
++    if (error != OT_ERROR_NONE)
+     {
+-        sleep(1);
++        blob_buf_init(&mBuf, 0);
++        AppendResult(error, aContext, aRequest);
+     }
+-
+-exit:
+-    AppendResult(error, aContext, aRequest);
+     return 0;
+ }
+ 
+@@ -675,26 +649,16 @@ int UbusServer::UbusLeaveHandlerDetail(struct ubus_context      *aContext,
+     OT_UNUSED_VARIABLE(aMethod);
+     OT_UNUSED_VARIABLE(aMsg);
+ 
+-    otError  error = OT_ERROR_NONE;
+-    uint64_t eventNum;
+-    ssize_t  retval;
+-
+-    mHostMutex->lock();
+-    otInstanceFactoryReset(mHost->GetInstance());
+-
+-    eventNum = 1;
+-    retval   = write(sUbusEfd, &eventNum, sizeof(uint64_t));
+-    if (retval != sizeof(uint64_t))
+-    {
+-        error = OT_ERROR_FAILED;
+-        goto exit;
+-    }
++    struct ubus_request_data request;
+ 
+     blob_buf_init(&mBuf, 0);
++    AppendResult(OT_ERROR_NONE, aContext, aRequest);
+ 
+-exit:
+-    mHostMutex->unlock();
+-    AppendResult(error, aContext, aRequest);
++    // Complete the request immediately, because otInstanceFactoryReset() won't return.
++    ubus_defer_request(aContext, aRequest, &request);
++    ubus_complete_deferred_request(aContext, &request, 0);
++
++    otInstanceFactoryReset(mHost->GetInstance());
+     return 0;
+ }
+ int UbusServer::UbusThreadHandler(struct ubus_context      *aContext,
+@@ -714,19 +678,16 @@ int UbusServer::UbusThreadHandler(struct ubus_context      *aContext,
+ 
+     if (!strcmp(aAction, "start"))
+     {
+-        mHostMutex->lock();
+         SuccessOrExit(error = otIp6SetEnabled(mHost->GetInstance(), true));
+         SuccessOrExit(error = otThreadSetEnabled(mHost->GetInstance(), true));
+     }
+     else if (!strcmp(aAction, "stop"))
+     {
+-        mHostMutex->lock();
+         SuccessOrExit(error = otThreadSetEnabled(mHost->GetInstance(), false));
+         SuccessOrExit(error = otIp6SetEnabled(mHost->GetInstance(), false));
+     }
+ 
+ exit:
+-    mHostMutex->unlock();
+     AppendResult(error, aContext, aRequest);
+     return 0;
+ }
+@@ -750,7 +711,6 @@ int UbusServer::UbusParentHandlerDetail(struct ubus_context      *aContext,
+ 
+     blob_buf_init(&mBuf, 0);
+ 
+-    mHostMutex->lock();
+     SuccessOrExit(error = otThreadGetParentInfo(mHost->GetInstance(), &parentInfo));
+ 
+     jsonArray = blobmsg_open_array(&mBuf, "parent_list");
+@@ -772,7 +732,6 @@ int UbusServer::UbusParentHandlerDetail(struct ubus_context      *aContext,
+     blobmsg_close_array(&mBuf, jsonArray);
+ 
+ exit:
+-    mHostMutex->unlock();
+     AppendResult(error, aContext, aRequest);
+     return error;
+ }
+@@ -799,7 +758,6 @@ int UbusServer::UbusNeighborHandlerDetail(struct ubus_context      *aContext,
+ 
+     sJsonUri = blobmsg_open_array(&mBuf, "neighbor_list");
+ 
+-    mHostMutex->lock();
+     while (otThreadGetNextNeighborInfo(mHost->GetInstance(), &iterator, &neighborInfo) == OT_ERROR_NONE)
+     {
+         jsonList = blobmsg_open_table(&mBuf, nullptr);
+@@ -847,8 +805,6 @@ int UbusServer::UbusNeighborHandlerDetail(struct ubus_context      *aContext,
+ 
+     blobmsg_close_array(&mBuf, sJsonUri);
+ 
+-    mHostMutex->unlock();
+-
+     AppendResult(error, aContext, aRequest);
+     return 0;
+ }
+@@ -944,8 +900,6 @@ int UbusServer::UbusCommissioner(struct ubus_context      *aContext,
+ 
+     otError error = OT_ERROR_NONE;
+ 
+-    mHostMutex->lock();
+-
+     if (!strcmp(aAction, "start"))
+     {
+         if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
+@@ -1010,7 +964,6 @@ int UbusServer::UbusCommissioner(struct ubus_context      *aContext,
+     }
+ 
+ exit:
+-    mHostMutex->unlock();
+     blob_buf_init(&mBuf, 0);
+     AppendResult(error, aContext, aRequest);
+     return 0;
+@@ -1087,7 +1040,6 @@ int UbusServer::UbusGetInformation(struct ubus_context      *aContext,
+ 
+     blob_buf_init(&mBuf, 0);
+ 
+-    mHostMutex->lock();
+     if (!strcmp(aAction, "networkname"))
+         blobmsg_add_string(&mBuf, "NetworkName", otThreadGetNetworkName(mHost->GetInstance()));
+     else if (!strcmp(aAction, "interfacename"))
+@@ -1303,7 +1255,6 @@ int UbusServer::UbusGetInformation(struct ubus_context      *aContext,
+ 
+     AppendResult(error, aContext, aRequest);
+ exit:
+-    mHostMutex->unlock();
+     return 0;
+ }
+ 
+@@ -1439,7 +1390,6 @@ int UbusServer::UbusSetInformation(struct ubus_context      *aContext,
+ 
+     blob_buf_init(&mBuf, 0);
+ 
+-    mHostMutex->lock();
+     if (!strcmp(aAction, "networkname"))
+     {
+         struct blob_attr *tb[SET_NETWORK_MAX];
+@@ -1613,7 +1563,6 @@ int UbusServer::UbusSetInformation(struct ubus_context      *aContext,
+     }
+ 
+ exit:
+-    mHostMutex->unlock();
+     AppendResult(error, aContext, aRequest);
+     return 0;
+ }
+@@ -1692,9 +1641,6 @@ void UbusServer::UbusConnectionLost(struct ubus_context *aContext)
+ 
+ int UbusServer::DisplayUbusInit(const char *aPath)
+ {
+-    uloop_init();
+-    signal(SIGPIPE, SIG_IGN);
+-
+     mSockPath = aPath;
+ 
+     mContext = ubus_connect(aPath);
+@@ -1738,13 +1684,6 @@ void UbusServer::InstallUbusObject(void)
+         otbrLogErr("Ubus connect failed");
+         return;
+     }
+-
+-    otbrLogInfo("Uloop run");
+-    uloop_run();
+-
+-    DisplayUbusDone();
+-
+-    uloop_done();
+ }
+ 
+ otError UbusServer::ParseLong(char *aString, long &aLong)
+@@ -1805,52 +1744,85 @@ exit:
+     return rval;
+ }
+ 
+-void UBusAgent::Init(void)
+-{
+-    otbr::ubus::sUbusEfd = eventfd(0, 0);
++// === UloopProcessor ===
+ 
+-    otbr::ubus::UbusServer::Initialize(&mHost, &mThreadMutex);
++UloopProcessor *UloopProcessor::sInstance = nullptr;
+ 
+-    if (otbr::ubus::sUbusEfd == -1)
++UloopProcessor::~UloopProcessor()
++{
++    if (uloop_fd_set_cb == &ULoopFDHandler)
+     {
+-        perror("Failed to create eventfd for ubus");
+-        exit(EXIT_FAILURE);
++        otbrLogDebug("Shutting down uloop");
++        uloop_done();
++        uloop_fd_set_cb = nullptr;
++        sInstance       = nullptr;
+     }
+-
+-    std::thread(UbusServerRun).detach();
+ }
+ 
+-void UBusAgent::Update(MainloopContext &aMainloop)
++void UloopProcessor::Init()
+ {
+-    VerifyOrExit(otbr::ubus::sUbusEfd != -1);
+-
+-    aMainloop.AddFdToReadSet(otbr::ubus::sUbusEfd);
+-exit:
+-    mThreadMutex.unlock();
+-    return;
++    VerifyOrDie(sInstance == nullptr, "Cannot initialize multiple uloop instances");
++    VerifyOrDie(uloop_fd_set_cb == nullptr, "An uloop fd set callback is already installed");
++    otbrLogDebug("Initializing uloop");
++    sInstance       = this;
++    uloop_fd_set_cb = &ULoopFDHandler;
++    uloop_init();
+ }
+ 
+-void UBusAgent::Process(const MainloopContext &aMainloop)
++void UloopProcessor::ULoopFDHandler(uloop_fd *aFd, unsigned int aFlags)
+ {
+-    ssize_t  retval;
+-    uint64_t num;
+-
+-    mThreadMutex.lock();
++    VerifyOrDie((aFlags & ~(ULOOP_READ | ULOOP_WRITE | ULOOP_BLOCKING)) == 0, "Unsupported uloop fd flags");
++    if (aFlags & (ULOOP_READ | ULOOP_WRITE))
++    {
++        // flags will be saved by uloop in aFd->flags
++        UloopProcessor::sInstance->mFds.insert(aFd);
++    }
++    else
++    {
++        UloopProcessor::sInstance->mFds.erase(aFd);
++    }
++}
+ 
+-    VerifyOrExit(otbr::ubus::sUbusEfd != -1);
++void UloopProcessor::Update(MainloopContext &aMainloop)
++{
++    for (auto &fd : mFds)
++    {
++        uint8_t sets = 0;
++        if (fd->flags & ULOOP_READ)
++        {
++            sets |= MainloopContext::kReadFdSet;
++        }
++        if (fd->flags & ULOOP_WRITE)
++        {
++            sets |= MainloopContext::kWriteFdSet;
++        }
++        aMainloop.AddFdToSet(fd->fd, sets);
++    }
+ 
+-    if (FD_ISSET(otbr::ubus::sUbusEfd, &aMainloop.mReadFdSet))
++    std::chrono::duration<int, std::milli> timeout(uloop_get_next_timeout());
++    if (timeout.count() > 0)
+     {
+-        retval = read(otbr::ubus::sUbusEfd, &num, sizeof(uint64_t));
+-        if (retval != sizeof(uint64_t))
++        auto timeval = ToTimeval(timeout);
++        if (timercmp(&timeval, &aMainloop.mTimeout, <))
+         {
+-            perror("read ubus eventfd failed\n");
+-            exit(EXIT_FAILURE);
++            aMainloop.mTimeout = timeval;
+         }
+     }
++}
+ 
+-exit:
+-    return;
++void UloopProcessor::Process(const MainloopContext &aMainloop)
++{
++    OT_UNUSED_VARIABLE(aMainloop);
++    uloop_run_timeout(0);
++}
++
++// === UBusAgent ===
++
++void UBusAgent::Init(void)
++{
++    UloopProcessor::Init();
++    UbusServer::Initialize(&mHost);
++    UbusServer::GetInstance().InstallUbusObject();
+ }
+ 
+ } // namespace ubus
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index f87e9c1c..77e4237c 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -36,6 +36,7 @@
+ 
+ #include "openthread-br/config.h"
+ 
++#include <set>
+ #include <stdarg.h>
+ #include <time.h>
+ 
+@@ -48,13 +49,7 @@
+ #include "common/mainloop.hpp"
+ #include "host/rcp_host.hpp"
+ 
+-extern "C" {
+-#include <libubox/blobmsg_json.h>
+-#include <libubox/uloop.h>
+-#include <libubox/ustream.h>
+-#include <libubox/utils.h>
+ #include <libubus.h>
+-}
+ 
+ namespace otbr {
+ namespace Host {
+@@ -77,9 +72,8 @@ public:
+      * Constructor
+      *
+      * @param[in] aHost  A pointer to OpenThread Controller structure.
+-     * @param[in] aMutex       A pointer to mutex.
+      */
+-    static void Initialize(Host::RcpHost *aHost, std::mutex *aMutex);
++    static void Initialize(Host::RcpHost *aHost);
+ 
+     /**
+      * This method return the instance of the global UbusServer.
+@@ -745,14 +739,15 @@ public:
+     void HandleDiagnosticGetResponse(otError aError, otMessage *aMessage, const otMessageInfo *aMessageInfo);
+ 
+ private:
+-    bool                 mIfFinishScan;
+-    struct ubus_context *mContext;
+-    const char          *mSockPath;
+-    struct blob_buf      mBuf;
+-    struct blob_buf      mNetworkdataBuf;
+-    Host::RcpHost       *mHost;
+-    std::mutex          *mHostMutex;
+-    time_t               mSecond;
++    struct ubus_context     *mContext;
++    const char              *mSockPath;
++    struct blob_buf          mBuf;
++    struct blob_buf          mNetworkdataBuf;
++    struct ubus_request_data mScanRequest;
++    struct blob_buf          mScanBuf{};
++    void                    *mScanArray;
++    Host::RcpHost           *mHost;
++    time_t                   mSecond;
+     enum
+     {
+         kDefaultJoinerTimeout = 120,
+@@ -762,14 +757,8 @@ private:
+      * Constructor
+      *
+      * @param[in] aHost    The pointer to OpenThread Controller structure.
+-     * @param[in] aMutex   A pointer to mutex.
+-     */
+-    UbusServer(Host::RcpHost *aHost, std::mutex *aMutex);
+-
+-    /**
+-     * This method start scan.
+      */
+-    void ProcessScan(void);
++    UbusServer(Host::RcpHost *aHost);
+ 
+     /**
+      * This method detailly start scan.
+@@ -1075,7 +1064,35 @@ private:
+     void AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest);
+ };
+ 
+-class UBusAgent : public MainloopProcessor
++class UloopProcessor : public MainloopProcessor
++{
++public:
++    UloopProcessor() = default;
++    ~UloopProcessor() override;
++
++    /**
++     * Initializes uloop.
++     *
++     * Only a single instance of UloopProcessor can be in an initialized state at any one time.
++     *
++     * Note: uloop will install signal handlers for SIGINT and SIGTERM if none have been installed yet.
++     * These handlers only work correctly when using the uloop main loop via uloop_run(). This means
++     * our otbr::Application handlers MUST be installed before calling this method.
++     */
++    void Init();
++
++    void Update(MainloopContext &aMainloop) override;
++    void Process(const MainloopContext &aMainloop) override;
++
++private:
++    static void ULoopFDHandler(uloop_fd *aFd, unsigned int aFlags);
++
++    std::set<uloop_fd *> mFds;
++
++    static UloopProcessor *sInstance;
++};
++
++class UBusAgent : public UloopProcessor
+ {
+ public:
+     /**
+@@ -1085,7 +1102,6 @@ public:
+      */
+     UBusAgent(otbr::Host::RcpHost &aHost)
+         : mHost(aHost)
+-        , mThreadMutex()
+     {
+     }
+ 
+@@ -1094,14 +1110,8 @@ public:
+      */
+     void Init(void);
+ 
+-    void Update(MainloopContext &aMainloop) override;
+-    void Process(const MainloopContext &aMainloop) override;
+-
+ private:
+-    static void UbusServerRun(void) { otbr::ubus::UbusServer::GetInstance().InstallUbusObject(); }
+-
+     otbr::Host::RcpHost &mHost;
+-    std::mutex           mThreadMutex;
+ };
+ } // namespace ubus
+ } // namespace otbr
+-- 
+2.50.1 (Apple Git-155)
+

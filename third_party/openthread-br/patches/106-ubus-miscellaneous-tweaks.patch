@@ -1,0 +1,780 @@
+From 55c3912f2fbf4a6b0d583bd67c3350f1ec6ed0b3 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Fri, 3 Oct 2025 22:13:18 +1300
+Subject: [PATCH] Ubus: Miscellaneous tweaks
+
+- Rename AppendResult and make it usable with different buffers
+- Make ParseLong a free functions
+- Add DeviceRoleToString that avoid strcpy / buffer in HandleState
+- Make mHost a reference instead of a pointer
+- Replace a final sprintf with snprintf
+- Add IgnoreError to async / best effort otThreadSendDiagnosticGet
+- Tidy up includes
+---
+ src/openwrt/ubus/otubus.cpp | 256 +++++++++++++++++-------------------
+ src/openwrt/ubus/otubus.hpp |  45 +------
+ 2 files changed, 131 insertions(+), 170 deletions(-)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 028e6901..a8254044 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -1,5 +1,5 @@
+ /*
+- *  Copyright (c) 2019, The OpenThread Authors.
++ *  Copyright (c) 2019-2026, The OpenThread Authors.
+  *  All rights reserved.
+  *
+  *  Redistribution and use in source and binary forms, with or without
+@@ -26,17 +26,11 @@
+  *  POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-#if __ORDER_BIG_ENDIAN__
+-#define BYTE_ORDER_BIG_ENDIAN 1
+-#endif
+-
+ #define OTBR_LOG_TAG "UBUS"
+ 
+ #include "openwrt/ubus/otubus.hpp"
+ 
+-#include <functional>
+-
+-#include <openthread/commissioner.h>
++#include <openthread/netdiag.h>
+ #include <openthread/thread.h>
+ #include <openthread/thread_ftd.h>
+ 
+@@ -50,11 +44,41 @@ namespace ubus {
+ 
+ static constexpr uint32_t kDefaultJoinerTimeout = 120;
+ 
++static otError ParseLong(char *aString, long &aLong);
++
++static char const *DeviceRoleToString(otDeviceRole aRole)
++{
++    const char *string = "invalid";
++    switch (aRole)
++    {
++    case OT_DEVICE_ROLE_DISABLED:
++        string = "disabled";
++        break;
++
++    case OT_DEVICE_ROLE_DETACHED:
++        string = "detached";
++        break;
++
++    case OT_DEVICE_ROLE_CHILD:
++        string = "child";
++        break;
++
++    case OT_DEVICE_ROLE_ROUTER:
++        string = "router";
++        break;
++
++    case OT_DEVICE_ROLE_LEADER:
++        string = "leader";
++        break;
++    }
++    return string;
++}
++
+ // === UbusServer ===
+ 
+ UbusServer::UbusServer(ubus_context &aContext, Host::RcpHost &aHost)
+     : mContext(aContext)
+-    , mHost(&aHost)
++    , mHost(aHost)
+ {
+     Object().name      = "otbr";
+     Object().type      = &sObjectType;
+@@ -93,10 +117,10 @@ void UbusServer::HandleActiveScanResult(otActiveScanResult *aResult, void *aCont
+     static_cast<UbusServer *>(aContext)->HandleActiveScanResultDetail(aResult);
+ }
+ 
+-void UbusServer::AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest)
++void UbusServer::SendInvokeResponse(ubus_request_data *aRequest, blob_buf *aBuf, otError aError)
+ {
+-    blobmsg_add_u16(&mBuf, "Error", aError);
+-    ubus_send_reply(aContext, aRequest, mBuf.head);
++    blobmsg_add_u16(aBuf, "Error", aError);
++    ubus_send_reply(&mContext, aRequest, aBuf->head);
+ }
+ 
+ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+@@ -106,8 +130,7 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+     if (aResult == nullptr)
+     {
+         blobmsg_close_array(&mScanBuf, mScanArray);
+-        blobmsg_add_u16(&mScanBuf, "Error", OT_ERROR_NONE);
+-        ubus_send_reply(&mContext, &mScanRequest, mScanBuf.head);
++        SendInvokeResponse(&mScanRequest, &mScanBuf, OT_ERROR_NONE);
+         ubus_complete_deferred_request(&mContext, &mScanRequest, 0);
+         goto exit;
+     }
+@@ -134,7 +157,7 @@ int UbusServer::HandleScan(ubus_request_data *aRequest)
+     uint16_t scanDuration = 0;
+ 
+     // Note: This returns kErrorBusy if a scan is already in progress.
+-    SuccessOrExit(error = otLinkActiveScan(mHost->GetInstance(), scanChannels, scanDuration,
++    SuccessOrExit(error = otLinkActiveScan(mHost.GetInstance(), scanChannels, scanDuration,
+                                            &UbusServer::HandleActiveScanResult, this));
+ 
+     ubus_defer_request(&mContext, aRequest, &mScanRequest);
+@@ -144,7 +167,7 @@ int UbusServer::HandleScan(ubus_request_data *aRequest)
+ exit:
+     if (error != OT_ERROR_NONE)
+     {
+-        AppendResult(error, &mContext, aRequest);
++        SendInvokeResponse(aRequest, &mBuf, error);
+     }
+     return 0;
+ }
+@@ -153,13 +176,13 @@ int UbusServer::HandleLeave(ubus_request_data *aRequest)
+ {
+     ubus_request_data request;
+ 
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+ 
+     // Complete the request immediately because otInstanceFactoryReset() won't return.
+     ubus_defer_request(&mContext, aRequest, &request);
+     ubus_complete_deferred_request(&mContext, &request, 0);
+ 
+-    otInstanceFactoryReset(mHost->GetInstance());
++    otInstanceFactoryReset(mHost.GetInstance());
+     return 0;
+ }
+ 
+@@ -167,11 +190,11 @@ int UbusServer::HandleThreadStart(ubus_request_data *aRequest)
+ {
+     otError error = OT_ERROR_NONE;
+ 
+-    SuccessOrExit(error = otIp6SetEnabled(mHost->GetInstance(), true));
+-    SuccessOrExit(error = otThreadSetEnabled(mHost->GetInstance(), true));
++    SuccessOrExit(error = otIp6SetEnabled(mHost.GetInstance(), true));
++    SuccessOrExit(error = otThreadSetEnabled(mHost.GetInstance(), true));
+ 
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -179,11 +202,11 @@ int UbusServer::HandleThreadStop(ubus_request_data *aRequest)
+ {
+     otError error = OT_ERROR_NONE;
+ 
+-    SuccessOrExit(error = otThreadSetEnabled(mHost->GetInstance(), false));
+-    SuccessOrExit(error = otIp6SetEnabled(mHost->GetInstance(), false));
++    SuccessOrExit(error = otThreadSetEnabled(mHost.GetInstance(), false));
++    SuccessOrExit(error = otIp6SetEnabled(mHost.GetInstance(), false));
+ 
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -194,7 +217,7 @@ int UbusServer::HandleParent(ubus_request_data *aRequest)
+     void        *jsonList  = nullptr;
+     void        *jsonArray = nullptr;
+ 
+-    SuccessOrExit(error = otThreadGetParentInfo(mHost->GetInstance(), &parentInfo));
++    SuccessOrExit(error = otThreadGetParentInfo(mHost.GetInstance(), &parentInfo));
+ 
+     jsonArray = blobmsg_open_array(&mBuf, "parent_list");
+     jsonList  = blobmsg_open_table(&mBuf, "parent");
+@@ -209,7 +232,7 @@ int UbusServer::HandleParent(ubus_request_data *aRequest)
+     blobmsg_close_array(&mBuf, jsonArray);
+ 
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -224,7 +247,7 @@ int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+ 
+     jsonList = blobmsg_open_array(&mBuf, "neighbor_list");
+ 
+-    while (otThreadGetNextNeighborInfo(mHost->GetInstance(), &iterator, &neighborInfo) == OT_ERROR_NONE)
++    while (otThreadGetNextNeighborInfo(mHost.GetInstance(), &iterator, &neighborInfo) == OT_ERROR_NONE)
+     {
+         jsonTable = blobmsg_open_table(&mBuf, nullptr);
+ 
+@@ -258,7 +281,7 @@ int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+     }
+ 
+     blobmsg_close_array(&mBuf, jsonList);
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -289,7 +312,7 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+     long                 value;
+     int                  length = 0;
+ 
+-    SuccessOrExit(error = otDatasetGetActive(mHost->GetInstance(), &dataset));
++    SuccessOrExit(error = otDatasetGetActive(mHost.GetInstance(), &dataset));
+ 
+     if (tb[NETWORKKEY] != nullptr)
+     {
+@@ -301,12 +324,12 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+     }
+     if (tb[NETWORKNAME] != nullptr)
+     {
++        const char *networkname                   = blobmsg_get_string(tb[NETWORKNAME]);
+         dataset.mComponents.mIsNetworkNamePresent = true;
+-        VerifyOrExit((length = static_cast<int>(strlen(blobmsg_get_string(tb[NETWORKNAME])))) <=
+-                         OT_NETWORK_NAME_MAX_SIZE,
++        VerifyOrExit((length = static_cast<int>(strlen(networkname))) <= OT_NETWORK_NAME_MAX_SIZE,
+                      error = OT_ERROR_PARSE);
+         memset(&dataset.mNetworkName, 0, sizeof(dataset.mNetworkName));
+-        memcpy(dataset.mNetworkName.m8, blobmsg_get_string(tb[NETWORKNAME]), static_cast<size_t>(length));
++        memcpy(dataset.mNetworkName.m8, networkname, static_cast<size_t>(length));
+         length = 0;
+     }
+     if (tb[EXTPANID] != nullptr)
+@@ -335,15 +358,15 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+                      error = OT_ERROR_PARSE);
+     }
+     dataset.mActiveTimestamp.mSeconds++;
+-    if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
++    if (otCommissionerGetState(mHost.GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
+     {
+-        otCommissionerStop(mHost->GetInstance());
++        otCommissionerStop(mHost.GetInstance());
+     }
+-    SuccessOrExit(error = otDatasetSendMgmtActiveSet(mHost->GetInstance(), &dataset, tlvs, static_cast<uint8_t>(length),
++    SuccessOrExit(error = otDatasetSendMgmtActiveSet(mHost.GetInstance(), &dataset, tlvs, static_cast<uint8_t>(length),
+                                                      /* aCallback */ nullptr,
+                                                      /* aContext */ nullptr));
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -351,12 +374,12 @@ int UbusServer::HandleCommissionerStart(ubus_request_data *aRequest)
+ {
+     otError error = OT_ERROR_NONE;
+ 
+-    if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
++    if (otCommissionerGetState(mHost.GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
+     {
+-        error = otCommissionerStart(mHost->GetInstance(), &UbusServer::HandleStateChanged,
++        error = otCommissionerStart(mHost.GetInstance(), &UbusServer::HandleStateChanged,
+                                     &UbusServer::HandleJoinerEvent, this);
+     }
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -396,10 +419,10 @@ int UbusServer::HandleJoinerAdd(ubus_request_data *aRequest, blob_attr *(&tb)[2]
+         }
+     }
+ 
+-    SuccessOrExit(error = otCommissionerAddJoiner(mHost->GetInstance(), addrPtr, pskd, kDefaultJoinerTimeout));
++    SuccessOrExit(error = otCommissionerAddJoiner(mHost.GetInstance(), addrPtr, pskd, kDefaultJoinerTimeout));
+ 
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -426,10 +449,10 @@ int UbusServer::HandleJoinerRemove(ubus_request_data *aRequest, blob_attr *(&aAr
+         }
+     }
+ 
+-    SuccessOrExit(error = otCommissionerRemoveJoiner(mHost->GetInstance(), addrPtr));
++    SuccessOrExit(error = otCommissionerRemoveJoiner(mHost.GetInstance(), addrPtr));
+ 
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -491,45 +514,43 @@ void UbusServer::HandleJoinerEvent(otCommissionerJoinerEvent aEvent,
+ 
+ int UbusServer::HandleNetworkName(ubus_request_data *aRequest)
+ {
+-    blobmsg_add_string(&mBuf, "NetworkName", otThreadGetNetworkName(mHost->GetInstance()));
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    blobmsg_add_string(&mBuf, "NetworkName", otThreadGetNetworkName(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandleInterfaceName(ubus_request_data *aRequest)
+ {
+-    blobmsg_add_string(&mBuf, "InterfaceName", mHost->GetInterfaceName());
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    blobmsg_add_string(&mBuf, "InterfaceName", mHost.GetInterfaceName());
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandleState(ubus_request_data *aRequest)
+ {
+-    char state[10];
+-    GetState(mHost->GetInstance(), state);
+-    blobmsg_add_string(&mBuf, "State", state);
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    blobmsg_add_string(&mBuf, "State", DeviceRoleToString(otThreadGetDeviceRole(mHost.GetInstance())));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandleChannel(ubus_request_data *aRequest)
+ {
+-    blobmsg_add_u32(&mBuf, "Channel", otLinkGetChannel(mHost->GetInstance()));
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    blobmsg_add_u32(&mBuf, "Channel", otLinkGetChannel(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandlePanId(ubus_request_data *aRequest)
+ {
+-    blobmsg_printf(&mBuf, "PanId", "0x%04x", otLinkGetPanId(mHost->GetInstance()));
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    blobmsg_printf(&mBuf, "PanId", "0x%04x", otLinkGetPanId(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandleRloc16(ubus_request_data *aRequest)
+ {
+-    blobmsg_printf(&mBuf, "rloc16", "0x%04x", otThreadGetRloc16(mHost->GetInstance()));
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    blobmsg_printf(&mBuf, "rloc16", "0x%04x", otThreadGetRloc16(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -537,9 +558,9 @@ int UbusServer::HandleNetworkKey(ubus_request_data *aRequest)
+ {
+     otNetworkKey key;
+ 
+-    otThreadGetNetworkKey(mHost->GetInstance(), &key);
++    otThreadGetNetworkKey(mHost.GetInstance(), &key);
+     blobmsg_add_hex_string(&mBuf, "Networkkey", key.m8, OT_NETWORK_KEY_SIZE);
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -547,17 +568,17 @@ int UbusServer::HandlePskc(ubus_request_data *aRequest)
+ {
+     otPskc pskc;
+ 
+-    otThreadGetPskc(mHost->GetInstance(), &pskc);
++    otThreadGetPskc(mHost.GetInstance(), &pskc);
+     blobmsg_add_hex_string(&mBuf, "pskc", pskc.m8, OT_PSKC_MAX_SIZE);
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandleExtPanId(ubus_request_data *aRequest)
+ {
+-    const uint8_t *extPanId = reinterpret_cast<const uint8_t *>(otThreadGetExtendedPanId(mHost->GetInstance()));
++    const uint8_t *extPanId = reinterpret_cast<const uint8_t *>(otThreadGetExtendedPanId(mHost.GetInstance()));
+     blobmsg_add_hex_string(&mBuf, "ExtPanId", extPanId, OT_EXT_PAN_ID_SIZE);
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -568,7 +589,7 @@ int UbusServer::HandleMode(ubus_request_data *aRequest)
+ 
+     memset(&linkMode, 0, sizeof(otLinkModeConfig));
+ 
+-    linkMode = otThreadGetLinkMode(mHost->GetInstance());
++    linkMode = otThreadGetLinkMode(mHost.GetInstance());
+ 
+     if (linkMode.mRxOnWhenIdle)
+     {
+@@ -585,14 +606,14 @@ int UbusServer::HandleMode(ubus_request_data *aRequest)
+         strcat(mode, "n");
+     }
+     blobmsg_add_string(&mBuf, "Mode", mode);
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandlePartitionId(ubus_request_data *aRequest)
+ {
+-    blobmsg_add_u32(&mBuf, "Partitionid", otThreadGetPartitionId(mHost->GetInstance()));
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    blobmsg_add_u32(&mBuf, "Partitionid", otThreadGetPartitionId(mHost.GetInstance()));
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -602,7 +623,7 @@ int UbusServer::HandleLeaderData(ubus_request_data *aRequest)
+     void        *jsonTable;
+     otLeaderData leaderData;
+ 
+-    SuccessOrExit(error = otThreadGetLeaderData(mHost->GetInstance(), &leaderData));
++    SuccessOrExit(error = otThreadGetLeaderData(mHost.GetInstance(), &leaderData));
+ 
+     jsonTable = blobmsg_open_table(&mBuf, "leaderdata");
+ 
+@@ -615,7 +636,7 @@ int UbusServer::HandleLeaderData(ubus_request_data *aRequest)
+     blobmsg_close_table(&mBuf, jsonTable);
+ 
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -639,8 +660,8 @@ int UbusServer::HandleNetworkData(ubus_request_data *aRequest)
+         tlvTypes[count++] = static_cast<uint8_t>(OT_NETWORK_DIAGNOSTIC_TLV_CHILD_TABLE);
+ 
+         mNetworkDataIndex = 0;
+-        otThreadSendDiagnosticGet(mHost->GetInstance(), &address, tlvTypes, count,
+-                                  &UbusServer::HandleDiagnosticGetResponse, this);
++        IgnoreError(otThreadSendDiagnosticGet(mHost.GetInstance(), &address, tlvTypes, count,
++                                              &UbusServer::HandleDiagnosticGetResponse, this));
+         mLastNetworkDataTime = time(nullptr);
+     }
+ exit:
+@@ -656,7 +677,7 @@ int UbusServer::HandleJoinerNum(ubus_request_data *aRequest)
+     int          joinerNum = 0;
+ 
+     jsonArray = blobmsg_open_array(&mBuf, "joinerList");
+-    while (otCommissionerGetNextJoinerInfo(mHost->GetInstance(), &iterator, &joinerInfo) == OT_ERROR_NONE)
++    while (otCommissionerGetNextJoinerInfo(mHost.GetInstance(), &iterator, &joinerInfo) == OT_ERROR_NONE)
+     {
+         jsonTable = blobmsg_open_table(&mBuf, nullptr);
+ 
+@@ -686,13 +707,13 @@ int UbusServer::HandleJoinerNum(ubus_request_data *aRequest)
+     blobmsg_close_array(&mBuf, jsonArray);
+ 
+     blobmsg_add_u32(&mBuf, "joinernum", joinerNum);
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandleMacFilterState(ubus_request_data *aRequest)
+ {
+-    otMacFilterAddressMode mode = otLinkFilterGetAddressMode(mHost->GetInstance());
++    otMacFilterAddressMode mode = otLinkFilterGetAddressMode(mHost.GetInstance());
+ 
+     if (mode == OT_MAC_FILTER_ADDRESS_MODE_DISABLED)
+     {
+@@ -711,7 +732,7 @@ int UbusServer::HandleMacFilterState(ubus_request_data *aRequest)
+         blobmsg_add_string(&mBuf, "state", "error");
+     }
+ 
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -723,13 +744,13 @@ int UbusServer::HandleMacFilterAddr(ubus_request_data *aRequest)
+ 
+     jsonArray = blobmsg_open_array(&mBuf, "addrlist");
+ 
+-    while (otLinkFilterGetNextAddress(mHost->GetInstance(), &iterator, &entry) == OT_ERROR_NONE)
++    while (otLinkFilterGetNextAddress(mHost.GetInstance(), &iterator, &entry) == OT_ERROR_NONE)
+     {
+         blobmsg_add_hex_string(&mBuf, "addr", entry.mExtAddress.m8, sizeof(entry.mExtAddress.m8));
+     }
+ 
+     blobmsg_close_array(&mBuf, jsonArray);
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -766,7 +787,7 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+     SuccessOrExit(aError);
+ 
+     char networkdata[20];
+-    sprintf(networkdata, "networkdata%d", mNetworkDataIndex++);
++    snprintf(networkdata, sizeof(networkdata), "networkdata%d", mNetworkDataIndex++);
+     jsonTable = blobmsg_open_table(&mNetworkdataBuf, networkdata);
+ 
+     if (IsRoutingLocator(&aMessageInfo->mSockAddr))
+@@ -856,10 +877,10 @@ int UbusServer::HandleSetNetworkName(ubus_request_data *aRequest, blob_attr *(&a
+     if (aArgs[0] != nullptr)
+     {
+         char *newName = blobmsg_get_string(aArgs[0]);
+-        SuccessOrExit(error = otThreadSetNetworkName(mHost->GetInstance(), newName));
++        SuccessOrExit(error = otThreadSetNetworkName(mHost.GetInstance(), newName));
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -874,10 +895,10 @@ int UbusServer::HandleSetChannel(ubus_request_data *aRequest, blob_attr *(&aArgs
+     if (aArgs[0] != nullptr)
+     {
+         uint32_t channel = blobmsg_get_u32(aArgs[0]);
+-        SuccessOrExit(error = otLinkSetChannel(mHost->GetInstance(), static_cast<uint8_t>(channel)));
++        SuccessOrExit(error = otLinkSetChannel(mHost.GetInstance(), static_cast<uint8_t>(channel)));
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -894,10 +915,10 @@ int UbusServer::HandleSetPanId(ubus_request_data *aRequest, blob_attr *(&aArgs)[
+         long  value;
+         char *panid = blobmsg_get_string(aArgs[0]);
+         SuccessOrExit(error = ParseLong(panid, value));
+-        error = otLinkSetPanId(mHost->GetInstance(), static_cast<otPanId>(value));
++        error = otLinkSetPanId(mHost.GetInstance(), static_cast<otPanId>(value));
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -913,10 +934,10 @@ int UbusServer::HandleSetNetworkKey(ubus_request_data *aRequest, blob_attr *(&aA
+     {
+         otNetworkKey key;
+         VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], key.m8, sizeof(key.m8)) > 0, error = OT_ERROR_PARSE);
+-        SuccessOrExit(error = otThreadSetNetworkKey(mHost->GetInstance(), &key));
++        SuccessOrExit(error = otThreadSetNetworkKey(mHost.GetInstance(), &key));
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -932,10 +953,10 @@ int UbusServer::HandleSetPskc(ubus_request_data *aRequest, blob_attr *(&aArgs)[1
+     {
+         otPskc pskc;
+         VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], pskc.m8, sizeof(pskc.m8)) > 0, error = OT_ERROR_PARSE);
+-        SuccessOrExit(error = otThreadSetPskc(mHost->GetInstance(), &pskc));
++        SuccessOrExit(error = otThreadSetPskc(mHost.GetInstance(), &pskc));
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -952,10 +973,10 @@ int UbusServer::HandleSetExtPanId(ubus_request_data *aRequest, blob_attr *(&aArg
+         otExtendedPanId extPanId;
+         VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extPanId.m8, sizeof(extPanId.m8)) > 0,
+                      error = OT_ERROR_PARSE);
+-        error = otThreadSetExtendedPanId(mHost->GetInstance(), &extPanId);
++        error = otThreadSetExtendedPanId(mHost.GetInstance(), &extPanId);
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -992,10 +1013,10 @@ int UbusServer::HandleSetMode(ubus_request_data *aRequest, blob_attr *(&aArgs)[1
+             }
+         }
+ 
+-        SuccessOrExit(error = otThreadSetLinkMode(mHost->GetInstance(), linkMode));
++        SuccessOrExit(error = otThreadSetLinkMode(mHost.GetInstance(), linkMode));
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -1013,12 +1034,12 @@ int UbusServer::HandleMacFilterAdd(ubus_request_data *aRequest, blob_attr *(&aAr
+         VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extAddr.m8, sizeof(extAddr.m8)) > 0,
+                      error = OT_ERROR_PARSE);
+ 
+-        error = otLinkFilterAddAddress(mHost->GetInstance(), &extAddr);
++        error = otLinkFilterAddAddress(mHost.GetInstance(), &extAddr);
+ 
+         VerifyOrExit(error == OT_ERROR_NONE || error == OT_ERROR_ALREADY);
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -1032,11 +1053,11 @@ int UbusServer::HandleMacFilterRemove(ubus_request_data *aRequest, blob_attr *(&
+         VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extAddr.m8, sizeof(extAddr.m8)) > 0,
+                      error = OT_ERROR_PARSE);
+ 
+-        otLinkFilterRemoveAddress(mHost->GetInstance(), &extAddr);
++        otLinkFilterRemoveAddress(mHost.GetInstance(), &extAddr);
+         error = OT_ERROR_NONE;
+     }
+ exit:
+-    AppendResult(error, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+@@ -1052,25 +1073,25 @@ int UbusServer::HandleMacFilterSetState(ubus_request_data *aRequest, blob_attr *
+ 
+         if (strcmp(state, "disable") == 0)
+         {
+-            otLinkFilterSetAddressMode(mHost->GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DISABLED);
++            otLinkFilterSetAddressMode(mHost.GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DISABLED);
+         }
+         else if (strcmp(state, "allowlist") == 0)
+         {
+-            otLinkFilterSetAddressMode(mHost->GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_ALLOWLIST);
++            otLinkFilterSetAddressMode(mHost.GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_ALLOWLIST);
+         }
+         else if (strcmp(state, "denylist") == 0)
+         {
+-            otLinkFilterSetAddressMode(mHost->GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DENYLIST);
++            otLinkFilterSetAddressMode(mHost.GetInstance(), OT_MAC_FILTER_ADDRESS_MODE_DENYLIST);
+         }
+     }
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+ int UbusServer::HandleMacFilterClear(ubus_request_data *aRequest)
+ {
+-    otLinkFilterClearAddresses(mHost->GetInstance());
+-    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
++    otLinkFilterClearAddresses(mHost.GetInstance());
++    SendInvokeResponse(aRequest, &mBuf, OT_ERROR_NONE);
+     return 0;
+ }
+ 
+@@ -1120,36 +1141,7 @@ const ubus_method UbusServer::sMethods[] = {
+ 
+ ubus_object_type UbusServer::sObjectType = UBUS_OBJECT_TYPE("otbr", sMethods);
+ 
+-void UbusServer::GetState(otInstance *aInstance, char *aState)
+-{
+-    switch (otThreadGetDeviceRole(aInstance))
+-    {
+-    case OT_DEVICE_ROLE_DISABLED:
+-        strcpy(aState, "disabled");
+-        break;
+-
+-    case OT_DEVICE_ROLE_DETACHED:
+-        strcpy(aState, "detached");
+-        break;
+-
+-    case OT_DEVICE_ROLE_CHILD:
+-        strcpy(aState, "child");
+-        break;
+-
+-    case OT_DEVICE_ROLE_ROUTER:
+-        strcpy(aState, "router");
+-        break;
+-
+-    case OT_DEVICE_ROLE_LEADER:
+-        strcpy(aState, "leader");
+-        break;
+-    default:
+-        strcpy(aState, "invalid aState");
+-        break;
+-    }
+-}
+-
+-otError UbusServer::ParseLong(char *aString, long &aLong)
++otError ParseLong(char *aString, long &aLong)
+ {
+     char *endptr;
+     aLong = strtol(aString, &endptr, 0);
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index bda458b3..676a10b9 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -1,5 +1,5 @@
+ /*
+- *  Copyright (c) 2019, The OpenThread Authors.
++ *  Copyright (c) 2019-2026, The OpenThread Authors.
+  *  All rights reserved.
+  *
+  *  Redistribution and use in source and binary forms, with or without
+@@ -37,19 +37,13 @@
+ #include "openthread-br/config.h"
+ 
+ #include <set>
+-#include <stdarg.h>
+-#include <time.h>
+ 
+-#include <openthread/ip6.h>
+-#include <openthread/link.h>
+-#include <openthread/netdiag.h>
+-#include <openthread/udp.h>
++#include <libubus.h>
++#include <openthread/commissioner.h>
++#include <openthread/thread.h>
+ 
+ #include "common/code_utils.hpp"
+ #include "common/mainloop.hpp"
+-#include "host/rcp_host.hpp"
+-
+-#include <libubus.h>
+ 
+ namespace otbr {
+ namespace Host {
+@@ -151,33 +145,8 @@ private:
+     static UbusServer &PrepareInvocation(ubus_object *aObj, ubus_request_data *aRequest, const char *aMethod);
+     friend struct UbusMethodHandler; // calls PrepareInvocation
+ 
+-    /**
+-     * This method convert thread network state to string.
+-     *
+-     * @param[in]  aInstance  A pointer to the instance.
+-     * @param[out] aState     A pointer to the string address.
+-     */
+-    void GetState(otInstance *aInstance, char *aState);
+-
+-    /**
+-     * This method parses an ASCII string as a long.
+-     *
+-     * @param[in]  aString  A pointer to the ASCII string.
+-     * @param[out] aLong    A reference to where the parsed long is placed.
+-     *
+-     * @retval OT_ERROR_NONE   Successfully parsed the ASCII string.
+-     * @retval OT_ERROR_PARSE  Could not parse the ASCII string.
+-     */
+-    otError ParseLong(char *aString, long &aLong);
+-
+-    /**
+-     * This method append result in message passed to ubus.
+-     *
+-     * @param[in] aError    The error type of the message.
+-     * @param[in] aContext  A pointer to the context.
+-     * @param[in] aRequest  A pointer to the request.
+-     */
+-    void AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest);
++    // Adds the provided error code to the response and sends it.
++    void SendInvokeResponse(ubus_request_data *aRequest, blob_buf *aBuf, otError aError);
+ 
+     static const ubus_method sMethods[];
+     static ubus_object_type  sObjectType;
+@@ -185,7 +154,7 @@ private:
+     ubus_object &Object() { return *this; }
+ 
+     ubus_context  &mContext;
+-    Host::RcpHost *mHost;
++    Host::RcpHost &mHost;
+ 
+     blob_buf mBuf{}; // default buffer for sync responses
+ 
+-- 
+2.50.1 (Apple Git-155)
+

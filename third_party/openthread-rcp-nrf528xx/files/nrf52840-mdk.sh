@@ -48,8 +48,17 @@ rcp_fw_nrf52840_mdk_bootloader() {  # devicename tty
 	for retry in 2 1 0; do
 		log debug "Triggering reset into UF2 boot loader"
 		uf2 reset "$tty"
-		sleep 1
-		usb_read_property "$dev" TYPE && [ "$REPLY" = 239/2/1 ] && return 0
+		for wait in 3 2 1; do
+			sleep 1
+			usb_read_property "$dev" TYPE && [ "$REPLY" = 239/2/1 ] && return 0
+		done
+		# Enumeration as a storage device sometimes fails, so the RCP
+		# might be restart the app and re-enumerate as a CDC device.
+		usb_find_devnode "$dev" tty ttyACM || break
+		if [ "$REPLY" != "$tty" ]; then
+			log debug "Re-resolved TTY for USB device $dev: $REPLY"
+			tty="$REPLY"
+		fi
 	done
 	log error "Failed to trigger UF2 boot loader on USB device $dev"
 	return "$RC_INTERNAL"

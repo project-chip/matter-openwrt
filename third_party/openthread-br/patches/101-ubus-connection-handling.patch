@@ -1,0 +1,369 @@
+From c735382f18325a47a8fcae280893b4527a510982 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 2 Oct 2025 13:09:47 +1300
+Subject: [PATCH] Ubus: Move connection logic into UBusAgent and reduce
+ reliance on globals / statics
+
+---
+ src/openwrt/ubus/otubus.cpp | 151 ++++++++++++++----------------------
+ src/openwrt/ubus/otubus.hpp |  77 +++++++-----------
+ 2 files changed, 84 insertions(+), 144 deletions(-)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 5d2724a8..a18af82a 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -53,9 +53,8 @@ const static int PANID_LENGTH      = 10;
+ const static int XPANID_LENGTH     = 64;
+ const static int NETWORKKEY_LENGTH = 64;
+ 
+-UbusServer::UbusServer(Host::RcpHost *aHost)
+-    : mContext(nullptr)
+-    , mSockPath(nullptr)
++UbusServer::UbusServer(ubus_context &aContext, Host::RcpHost *aHost)
++    : mContext(aContext)
+     , mHost(aHost)
+     , mSecond(0)
+ {
+@@ -71,9 +70,9 @@ UbusServer &UbusServer::GetInstance(void)
+     return *sUbusServerInstance;
+ }
+ 
+-void UbusServer::Initialize(Host::RcpHost *aHost)
++void UbusServer::Initialize(ubus_context &aContext, Host::RcpHost *aHost)
+ {
+-    sUbusServerInstance = new UbusServer(aHost);
++    sUbusServerInstance = new UbusServer(aContext, aHost);
+ }
+ 
+ enum
+@@ -248,8 +247,8 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+     {
+         blobmsg_close_array(&mScanBuf, mScanArray);
+         blobmsg_add_u16(&mScanBuf, "Error", OT_ERROR_NONE);
+-        ubus_send_reply(mContext, &mScanRequest, mScanBuf.head);
+-        ubus_complete_deferred_request(mContext, &mScanRequest, 0);
++        ubus_send_reply(&mContext, &mScanRequest, mScanBuf.head);
++        ubus_complete_deferred_request(&mContext, &mScanRequest, 0);
+         goto exit;
+     }
+ 
+@@ -302,7 +301,7 @@ int UbusServer::UbusScanHandlerDetail(struct ubus_context      *aContext,
+     SuccessOrExit(error = otLinkActiveScan(mHost->GetInstance(), scanChannels, scanDuration,
+                                            &UbusServer::HandleActiveScanResult, this));
+ 
+-    ubus_defer_request(mContext, aRequest, &mScanRequest);
++    ubus_defer_request(&mContext, aRequest, &mScanRequest);
+     blob_buf_init(&mScanBuf, 0);
+     mScanArray = blobmsg_open_array(&mScanBuf, "scan_list");
+ 
+@@ -1596,93 +1595,11 @@ void UbusServer::GetState(otInstance *aInstance, char *aState)
+     }
+ }
+ 
+-void UbusServer::UbusAddFd()
+-{
+-    // ubus library function
+-    ubus_add_uloop(mContext);
+-
+-#ifdef FD_CLOEXEC
+-    fcntl(mContext->sock.fd, F_SETFD, fcntl(mContext->sock.fd, F_GETFD) | FD_CLOEXEC);
+-#endif
+-}
+-
+-void UbusServer::UbusReconnTimer(struct uloop_timeout *aTimeout)
+-{
+-    GetInstance().UbusReconnTimerDetail(aTimeout);
+-}
+-
+-void UbusServer::UbusReconnTimerDetail(struct uloop_timeout *aTimeout)
+-{
+-    OT_UNUSED_VARIABLE(aTimeout);
+-
+-    static struct uloop_timeout retry = {
+-        list : {},
+-        pending : false,
+-        cb : UbusReconnTimer,
+-        time : {},
+-    };
+-    int time = 2;
+-
+-    if (ubus_reconnect(mContext, mSockPath) != 0)
+-    {
+-        uloop_timeout_set(&retry, time * 1000);
+-        return;
+-    }
+-
+-    UbusAddFd();
+-}
+-
+-void UbusServer::UbusConnectionLost(struct ubus_context *aContext)
+-{
+-    OT_UNUSED_VARIABLE(aContext);
+-
+-    UbusReconnTimer(nullptr);
+-}
+-
+-int UbusServer::DisplayUbusInit(const char *aPath)
+-{
+-    mSockPath = aPath;
+-
+-    mContext = ubus_connect(aPath);
+-    if (!mContext)
+-    {
+-        otbrLogErr("Ubus connect failed");
+-        return -1;
+-    }
+-
+-    otbrLogInfo("Connected as %08x\n", mContext->local_id);
+-    mContext->connection_lost = UbusConnectionLost;
+-
+-    /* file description */
+-    UbusAddFd();
+-
+-    /* Add a object */
+-    if (ubus_add_object(mContext, &otbr) != 0)
+-    {
+-        otbrLogErr("Ubus add obj failed");
+-        return -1;
+-    }
+-
+-    return 0;
+-}
+-
+-void UbusServer::DisplayUbusDone(void)
+-{
+-    if (mContext)
+-    {
+-        ubus_free(mContext);
+-        mContext = nullptr;
+-    }
+-}
+-
+ void UbusServer::InstallUbusObject(void)
+ {
+-    char *path = nullptr;
+-
+-    if (-1 == DisplayUbusInit(path))
++    if (ubus_add_object(&mContext, &otbr) != 0)
+     {
+-        otbrLogErr("Ubus connect failed");
+-        return;
++        otbrLogErr("Failed to publish object");
+     }
+ }
+ 
+@@ -1818,12 +1735,58 @@ void UloopProcessor::Process(const MainloopContext &aMainloop)
+ 
+ // === UBusAgent ===
+ 
+-void UBusAgent::Init(void)
++UBusAgent::UBusAgent(otbr::Host::RcpHost &aHost)
++    : ubus_context{}
++    , uloop_timeout{}
++    , mHost(aHost)
++{
++}
++
++UBusAgent::~UBusAgent()
++{
++    uloop_timeout_cancel(&ReconnectTimer());
++    ubus_shutdown(&Context());
++}
++
++void UBusAgent::Init()
+ {
+     UloopProcessor::Init();
+-    UbusServer::Initialize(&mHost);
++
++    // Hard-fail on initial connection error; later disconnection is handled gracefully.
++    VerifyOrDie(ubus_connect_ctx(&Context(), nullptr) == 0, "Unable to connect to ubus");
++    UbusConnected();
++
++    UbusServer::Initialize(Context(), &mHost);
+     UbusServer::GetInstance().InstallUbusObject();
+ }
+ 
++void UBusAgent::UbusConnected()
++{
++    otbrLogInfo("Connected to ubus (peer id %08x)", Context().local_id);
++    Context().connection_lost = [](ubus_context *aCtx) { static_cast<UBusAgent *>(aCtx)->OnConnectionLost(); };
++    ubus_add_uloop(&Context());
++}
++
++void UBusAgent::OnConnectionLost()
++{
++    otbrLogInfo("Connection to ubus lost");
++    // Make the first attempt immediately
++    OnReconnectTimer();
++}
++
++void UBusAgent::OnReconnectTimer()
++{
++    otbrLogDebug("Reconnecting...");
++    if (ubus_reconnect(&Context(), nullptr) == 0)
++    {
++        UbusConnected(); // our objects have been republished by ubus_reconnect()
++    }
++    else
++    {
++        ReconnectTimer().cb = [](uloop_timeout *aTimeout) { static_cast<UBusAgent *>(aTimeout)->OnReconnectTimer(); };
++        uloop_timeout_set(&ReconnectTimer(), 2000 /* ms */);
++    }
++}
++
+ } // namespace ubus
+ } // namespace otbr
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index 77e4237c..6396dfa9 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -65,6 +65,14 @@ namespace ubus {
+  *   This namespace contains definitions for ubus related instance.
+  */
+ 
++// Implementation note: Some of these classes use a pattern of inheriting
++// privately from ubus_* structs that would commonly be members instead.
++// This pattern allows static callback stubs that receive a pointer to the
++// ubus structure to recover the owning object via a simple down cast from
++// the base class pointer. In C, these functions would instead use
++// container_of(), but its use is not generally safe in C++, especially when
++// the container type is not standard-layout.
++
+ class UbusServer
+ {
+ public:
+@@ -73,7 +81,7 @@ public:
+      *
+      * @param[in] aHost  A pointer to OpenThread Controller structure.
+      */
+-    static void Initialize(Host::RcpHost *aHost);
++    static void Initialize(ubus_context &aContext, Host::RcpHost *aHost);
+ 
+     /**
+      * This method return the instance of the global UbusServer.
+@@ -739,8 +747,7 @@ public:
+     void HandleDiagnosticGetResponse(otError aError, otMessage *aMessage, const otMessageInfo *aMessageInfo);
+ 
+ private:
+-    struct ubus_context     *mContext;
+-    const char              *mSockPath;
++    ubus_context            &mContext;
+     struct blob_buf          mBuf;
+     struct blob_buf          mNetworkdataBuf;
+     struct ubus_request_data mScanRequest;
+@@ -748,6 +755,7 @@ private:
+     void                    *mScanArray;
+     Host::RcpHost           *mHost;
+     time_t                   mSecond;
++
+     enum
+     {
+         kDefaultJoinerTimeout = 120,
+@@ -758,7 +766,7 @@ private:
+      *
+      * @param[in] aHost    The pointer to OpenThread Controller structure.
+      */
+-    UbusServer(Host::RcpHost *aHost);
++    UbusServer(ubus_context &aContext, Host::RcpHost *aHost);
+ 
+     /**
+      * This method detailly start scan.
+@@ -983,46 +991,6 @@ private:
+      */
+     void GetState(otInstance *aInstance, char *aState);
+ 
+-    /**
+-     * This method add fd of ubus object.
+-     */
+-    void UbusAddFd(void);
+-
+-    /**
+-     * This method set ubus reconnect time.
+-     *
+-     * @param[in] aTimeout  A pointer to the timeout.
+-     */
+-    static void UbusReconnTimer(struct uloop_timeout *aTimeout);
+-
+-    /**
+-     * This method detailly handle ubus reconnect time.
+-     *
+-     * @param[in] aTimeout  A pointer to the timeout.
+-     */
+-    void UbusReconnTimerDetail(struct uloop_timeout *aTimeout);
+-
+-    /**
+-     * This method handle ubus connection lost.
+-     *
+-     * @param[in] aContext  A pointer to the context.
+-     */
+-    static void UbusConnectionLost(struct ubus_context *aContext);
+-
+-    /**
+-     * This method connect and display ubus.
+-     *
+-     * @param[in] aPath  A pointer to the ubus server path(default is nullptr).
+-     *
+-     * @retval 0  Successfully handler the request.
+-     */
+-    int DisplayUbusInit(const char *aPath);
+-
+-    /**
+-     * This method disconnect and display ubus.
+-     */
+-    void DisplayUbusDone(void);
+-
+     /**
+      * This method parses an ASCII string as a long.
+      *
+@@ -1064,6 +1032,9 @@ private:
+     void AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest);
+ };
+ 
++/**
++ * Integrates uloop with the OTBR main loop.
++ */
+ class UloopProcessor : public MainloopProcessor
+ {
+ public:
+@@ -1092,7 +1063,7 @@ private:
+     static UloopProcessor *sInstance;
+ };
+ 
+-class UBusAgent : public UloopProcessor
++class UBusAgent : public UloopProcessor, private ubus_context, private uloop_timeout
+ {
+ public:
+     /**
+@@ -1100,17 +1071,23 @@ public:
+      *
+      * @param[in] aHost  A reference to the Thread controller.
+      */
+-    UBusAgent(otbr::Host::RcpHost &aHost)
+-        : mHost(aHost)
+-    {
+-    }
++    UBusAgent(otbr::Host::RcpHost &aHost);
++    ~UBusAgent() override;
+ 
+     /**
+-     * This method initializes the UBus agent.
++     * Connects to ubus and publishes OTBR objects.
+      */
+     void Init(void);
+ 
+ private:
++    ubus_context  &Context() { return *this; }
++    uloop_timeout &ReconnectTimer() { return *this; }
++
++    void OnConnectionLost();
++    void OnReconnectTimer();
++
++    void UbusConnected();
++
+     otbr::Host::RcpHost &mHost;
+ };
+ } // namespace ubus
+-- 
+2.50.1 (Apple Git-155)
+

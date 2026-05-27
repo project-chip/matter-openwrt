@@ -1,0 +1,156 @@
+From a8aef8564a073dd537148d7044297ac564abc3ba Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Fri, 3 Oct 2025 17:29:54 +1300
+Subject: [PATCH] Ubus: Use blobmsg_printf instead of sprintf with explicit
+ buffers
+
+---
+ src/openwrt/ubus/otubus.cpp | 49 +++++++++----------------------------
+ 1 file changed, 12 insertions(+), 37 deletions(-)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 78860e40..05b7cf99 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -50,7 +50,6 @@ namespace ubus {
+ 
+ static constexpr uint32_t kDefaultJoinerTimeout = 120;
+ 
+-const static int PANID_LENGTH      = 10;
+ const static int XPANID_LENGTH     = 64;
+ const static int NETWORKKEY_LENGTH = 64;
+ 
+@@ -117,7 +116,6 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+ {
+     void *jsonList = nullptr;
+ 
+-    char panidstring[PANID_LENGTH];
+     char xpanidstring[XPANID_LENGTH] = "";
+ 
+     if (aResult == nullptr)
+@@ -136,8 +134,7 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+     OutputBytes(aResult->mExtendedPanId.m8, OT_EXT_PAN_ID_SIZE, xpanidstring);
+     blobmsg_add_string(&mScanBuf, "ExtendedPanId", xpanidstring);
+ 
+-    sprintf(panidstring, "0x%04x", aResult->mPanId);
+-    blobmsg_add_string(&mScanBuf, "PanId", panidstring);
++    blobmsg_printf(&mScanBuf, "PanId", "0x%04x", aResult->mPanId);
+ 
+     blobmsg_add_u32(&mScanBuf, "Channel", aResult->mChannel);
+ 
+@@ -216,7 +213,6 @@ int UbusServer::HandleParent(ubus_request_data *aRequest)
+     otError      error = OT_ERROR_NONE;
+     otRouterInfo parentInfo;
+     char         extAddress[XPANID_LENGTH] = "";
+-    char         transfer[XPANID_LENGTH]   = "";
+     void        *jsonList                  = nullptr;
+     void        *jsonArray                 = nullptr;
+ 
+@@ -225,12 +221,8 @@ int UbusServer::HandleParent(ubus_request_data *aRequest)
+     jsonArray = blobmsg_open_array(&mBuf, "parent_list");
+     jsonList  = blobmsg_open_table(&mBuf, "parent");
+     blobmsg_add_string(&mBuf, "Role", "R");
+-
+-    sprintf(transfer, "0x%04x", parentInfo.mRloc16);
+-    blobmsg_add_string(&mBuf, "Rloc16", transfer);
+-
+-    sprintf(transfer, "%3d", parentInfo.mAge);
+-    blobmsg_add_string(&mBuf, "Age", transfer);
++    blobmsg_printf(&mBuf, "Rloc16", "0x%04x", parentInfo.mRloc16);
++    blobmsg_printf(&mBuf, "Age", "%3d", parentInfo.mAge);
+ 
+     OutputBytes(parentInfo.mExtAddress.m8, sizeof(parentInfo.mExtAddress.m8), extAddress);
+     blobmsg_add_string(&mBuf, "ExtAddress", extAddress);
+@@ -250,7 +242,6 @@ int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+     otError                error = OT_ERROR_NONE;
+     otNeighborInfo         neighborInfo;
+     otNeighborInfoIterator iterator                  = OT_NEIGHBOR_INFO_ITERATOR_INIT;
+-    char                   transfer[XPANID_LENGTH]   = "";
+     void                  *jsonList                  = nullptr;
+     void                  *jsonTable                 = nullptr;
+     char                   mode[5]                   = "";
+@@ -263,18 +254,10 @@ int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+         jsonTable = blobmsg_open_table(&mBuf, nullptr);
+ 
+         blobmsg_add_string(&mBuf, "Role", neighborInfo.mIsChild ? "C" : "R");
+-
+-        sprintf(transfer, "0x%04x", neighborInfo.mRloc16);
+-        blobmsg_add_string(&mBuf, "Rloc16", transfer);
+-
+-        sprintf(transfer, "%3d", neighborInfo.mAge);
+-        blobmsg_add_string(&mBuf, "Age", transfer);
+-
+-        sprintf(transfer, "%8d", neighborInfo.mAverageRssi);
+-        blobmsg_add_string(&mBuf, "AvgRssi", transfer);
+-
+-        sprintf(transfer, "%9d", neighborInfo.mLastRssi);
+-        blobmsg_add_string(&mBuf, "LastRssi", transfer);
++        blobmsg_printf(&mBuf, "Rloc16", "0x%04x", neighborInfo.mRloc16);
++        blobmsg_printf(&mBuf, "Age", "%3d", neighborInfo.mAge);
++        blobmsg_printf(&mBuf, "AvgRssi", "%8d", neighborInfo.mAverageRssi);
++        blobmsg_printf(&mBuf, "LastRssi", "%9d", neighborInfo.mLastRssi);
+ 
+         if (neighborInfo.mRxOnWhenIdle)
+         {
+@@ -571,18 +554,14 @@ int UbusServer::HandleChannel(ubus_request_data *aRequest)
+ 
+ int UbusServer::HandlePanId(ubus_request_data *aRequest)
+ {
+-    char panIdString[PANID_LENGTH];
+-    sprintf(panIdString, "0x%04x", otLinkGetPanId(mHost->GetInstance()));
+-    blobmsg_add_string(&mBuf, "PanId", panIdString);
++    blobmsg_printf(&mBuf, "PanId", "0x%04x", otLinkGetPanId(mHost->GetInstance()));
+     AppendResult(OT_ERROR_NONE, &mContext, aRequest);
+     return 0;
+ }
+ 
+ int UbusServer::HandleRloc16(ubus_request_data *aRequest)
+ {
+-    char rloc[PANID_LENGTH];
+-    sprintf(rloc, "0x%04x", otThreadGetRloc16(mHost->GetInstance()));
+-    blobmsg_add_string(&mBuf, "rloc16", rloc);
++    blobmsg_printf(&mBuf, "rloc16", "0x%04x", otThreadGetRloc16(mHost->GetInstance()));
+     AppendResult(OT_ERROR_NONE, &mContext, aRequest);
+     return 0;
+ }
+@@ -825,7 +804,6 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+     void                 *jsonTable  = nullptr;
+     void                 *jsonArray  = nullptr;
+     void                 *jsonItem   = nullptr;
+-    char                  xrloc[10];
+     otNetworkDiagTlv      diagTlv;
+     otNetworkDiagIterator iterator = OT_NETWORK_DIAGNOSTIC_ITERATOR_INIT;
+ 
+@@ -838,8 +816,7 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+     if (IsRoutingLocator(&aMessageInfo->mSockAddr))
+     {
+         sockRloc16 = ntohs(aMessageInfo->mPeerAddr.mFields.m16[7]);
+-        sprintf(xrloc, "0x%04x", sockRloc16);
+-        blobmsg_add_string(&mNetworkdataBuf, "rloc", xrloc);
++        blobmsg_printf(&mNetworkdataBuf, "rloc", "0x%04x", sockRloc16);
+     }
+ 
+     while (otThreadGetNextDiagnosticTlv(aMessage, &iterator, &diagTlv) == OT_ERROR_NONE)
+@@ -862,8 +839,7 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+                     jsonItem = blobmsg_open_table(&mNetworkdataBuf, "router");
+                     rloc16   = route.mRouteData[i].mRouterId << 10;
+                     blobmsg_add_u32(&mNetworkdataBuf, "routerid", route.mRouteData[i].mRouterId);
+-                    sprintf(xrloc, "0x%04x", rloc16);
+-                    blobmsg_add_string(&mNetworkdataBuf, "rloc", xrloc);
++                    blobmsg_printf(&mNetworkdataBuf, "rloc", "0x%04x", rloc16);
+                     blobmsg_close_table(&mNetworkdataBuf, jsonItem);
+                 }
+             }
+@@ -887,8 +863,7 @@ void UbusServer::HandleDiagnosticGetResponse(otError aError, otMessage *aMessage
+                 uint8_t mode = 0;
+ 
+                 jsonItem = blobmsg_open_table(&mNetworkdataBuf, "child");
+-                sprintf(xrloc, "0x%04x", (sockRloc16 | entry.mChildId));
+-                blobmsg_add_string(&mNetworkdataBuf, "rloc", xrloc);
++                blobmsg_printf(&mNetworkdataBuf, "rloc", "0x%04x", (sockRloc16 | entry.mChildId));
+ 
+                 mode = (entry.mMode.mRxOnWhenIdle ? kModeRxOnWhenIdle : 0) |
+                        (entry.mMode.mDeviceType ? kModeFullThreadDevice : 0) |
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,33 @@
+From ac4fdf43a0b1f44029dc107d3f74f9ab2644154f Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 27 May 2026 16:08:51 +1200
+Subject: [PATCH] Don't require vendor/model names for --radio-version
+
+---
+ src/agent/realmain.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/agent/realmain.cpp b/src/agent/realmain.cpp
+index 314fd195..cabf6d86 100644
+--- a/src/agent/realmain.cpp
++++ b/src/agent/realmain.cpp
+@@ -353,14 +353,14 @@ static int realmain(int argc, char *argv[])
+     }
+ 
+ #ifndef OTBR_VENDOR_NAME
+-    if (vendorName == nullptr)
++    if (vendorName == nullptr && !printRadioVersion)
+     {
+         fprintf(stderr, "Vendor name must be set.\n");
+         ExitNow(ret = EXIT_FAILURE);
+     }
+ #endif
+ #ifndef OTBR_PRODUCT_NAME
+-    if (productName == nullptr)
++    if (productName == nullptr && !printRadioVersion)
+     {
+         fprintf(stderr, "Model name must be set.\n");
+         ExitNow(ret = EXIT_FAILURE);
+-- 
+2.50.1 (Apple Git-155)
+
