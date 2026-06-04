@@ -53,7 +53,7 @@ rcp_fw_nrf52840_mdk_bootloader() {  # devicename tty
 			usb_read_property "$dev" TYPE && [ "$REPLY" = 239/2/1 ] && return 0
 		done
 		# Enumeration as a storage device sometimes fails, so the RCP
-		# might be restart the app and re-enumerate as a CDC device.
+		# might exit the bootloader and re-enumerate as a CDC device.
 		usb_find_devnode "$dev" tty ttyACM || break
 		if [ "$REPLY" != "$tty" ]; then
 			log debug "Re-resolved TTY for USB device $dev: $REPLY"
