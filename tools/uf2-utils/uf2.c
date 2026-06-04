@@ -90,19 +90,20 @@ static int reset(char const *device) {
         usleep(1000); // 1ms intervals, up to 2s
         if (t >= 2000) {
             fprintf(stderr, "timeout\n");
-            exit(3); // close() might block for a while, let the kernel deal with cleanup
+            fd = -1; // skip close() since it may block
+            goto failed;
         }
         if (tcgetattr(fd, &tio) < 0) {
             if (errno == EIO) {
-                exit(0); // device disconnected; skip close() which may block
+                break; // device disconnected
             } else if (errno != EINTR && errno != EAGAIN) {
                 log_error("polling tcgetattr");
-                break; // give up anyway
+                break; // some other error, give up anyway
             }
         }
     }
 
-    close(fd);
+    // Skip close(fd) since it may still block; the kernel will handle cleanup.
     return 0;
 
 failed:
