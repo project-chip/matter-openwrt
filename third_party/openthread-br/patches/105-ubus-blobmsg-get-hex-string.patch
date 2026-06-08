@@ -1,0 +1,299 @@
+From c2c69b2d4111e3995abd562c267d18b6d2c71a5c Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 30 Apr 2026 13:56:58 +1200
+Subject: [PATCH] Ubus: Add blobmsg_get_hex_string for parsing hex values
+
+This replaces blobmsg_get_string + Hex2Bin.
+
+Also don't accept ExtendedPanID's < 16 hex characters in "mgmtset" and
+"setextpanid"; previously missing bytes were left uninitialized.
+---
+ src/openwrt/ubus/otubus.cpp     | 92 ++++++---------------------------
+ src/openwrt/ubus/otubus.hpp     | 11 ----
+ src/openwrt/ubus/ubus_utils.cpp | 44 ++++++++++++++++
+ src/openwrt/ubus/ubus_utils.hpp | 12 +++++
+ 4 files changed, 72 insertions(+), 87 deletions(-)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 114d36bf..028e6901 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -294,9 +294,9 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+     if (tb[NETWORKKEY] != nullptr)
+     {
+         dataset.mComponents.mIsNetworkKeyPresent = true;
+-        VerifyOrExit((length = Hex2Bin(blobmsg_get_string(tb[NETWORKKEY]), dataset.mNetworkKey.m8,
+-                                       sizeof(dataset.mNetworkKey.m8))) == OT_NETWORK_KEY_SIZE,
+-                     error = OT_ERROR_PARSE);
++        VerifyOrExit(
++            blobmsg_get_hex_string_fixed(tb[NETWORKKEY], dataset.mNetworkKey.m8, sizeof(dataset.mNetworkKey.m8)) > 0,
++            error = OT_ERROR_PARSE);
+         length = 0;
+     }
+     if (tb[NETWORKNAME] != nullptr)
+@@ -312,8 +312,8 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+     if (tb[EXTPANID] != nullptr)
+     {
+         dataset.mComponents.mIsExtendedPanIdPresent = true;
+-        VerifyOrExit(Hex2Bin(blobmsg_get_string(tb[EXTPANID]), dataset.mExtendedPanId.m8,
+-                             sizeof(dataset.mExtendedPanId.m8)) >= 0,
++        VerifyOrExit(blobmsg_get_hex_string_fixed(tb[EXTPANID], dataset.mExtendedPanId.m8,
++                                                  sizeof(dataset.mExtendedPanId.m8)) > 0,
+                      error = OT_ERROR_PARSE);
+     }
+     if (tb[PANID] != nullptr)
+@@ -331,10 +331,8 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+     if (tb[PSKC] != nullptr)
+     {
+         dataset.mComponents.mIsPskcPresent = true;
+-        VerifyOrExit((length = Hex2Bin(blobmsg_get_string(tb[PSKC]), dataset.mPskc.m8, sizeof(dataset.mPskc.m8))) ==
+-                         OT_PSKC_MAX_SIZE,
++        VerifyOrExit(blobmsg_get_hex_string_fixed(tb[PSKC], dataset.mPskc.m8, sizeof(dataset.mPskc.m8)) > 0,
+                      error = OT_ERROR_PARSE);
+-        length = 0;
+     }
+     dataset.mActiveTimestamp.mSeconds++;
+     if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
+@@ -393,8 +391,7 @@ int UbusServer::HandleJoinerAdd(ubus_request_data *aRequest, blob_attr *(&tb)[2]
+         }
+         else
+         {
+-            VerifyOrExit(Hex2Bin(blobmsg_get_string(tb[EUI64]), addr.m8, sizeof(addr)) == sizeof(addr),
+-                         error = OT_ERROR_PARSE);
++            VerifyOrExit(blobmsg_get_hex_string_fixed(tb[EUI64], addr.m8, sizeof(addr.m8)) > 0, error = OT_ERROR_PARSE);
+             addrPtr = &addr;
+         }
+     }
+@@ -424,8 +421,7 @@ int UbusServer::HandleJoinerRemove(ubus_request_data *aRequest, blob_attr *(&aAr
+         }
+         else
+         {
+-            VerifyOrExit(Hex2Bin(blobmsg_get_string(aArgs[0]), addr.m8, sizeof(addr)) == sizeof(addr),
+-                         error = OT_ERROR_PARSE);
++            VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], addr.m8, sizeof(addr.m8)) > 0, error = OT_ERROR_PARSE);
+             addrPtr = &addr;
+         }
+     }
+@@ -916,9 +912,7 @@ int UbusServer::HandleSetNetworkKey(ubus_request_data *aRequest, blob_attr *(&aA
+     if (aArgs[0] != nullptr)
+     {
+         otNetworkKey key;
+-        char        *networkkey = blobmsg_get_string(aArgs[0]);
+-
+-        VerifyOrExit(Hex2Bin(networkkey, key.m8, sizeof(key.m8)) == OT_NETWORK_KEY_SIZE, error = OT_ERROR_PARSE);
++        VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], key.m8, sizeof(key.m8)) > 0, error = OT_ERROR_PARSE);
+         SuccessOrExit(error = otThreadSetNetworkKey(mHost->GetInstance(), &key));
+     }
+ exit:
+@@ -937,9 +931,7 @@ int UbusServer::HandleSetPskc(ubus_request_data *aRequest, blob_attr *(&aArgs)[1
+     if (aArgs[0] != nullptr)
+     {
+         otPskc pskc;
+-
+-        VerifyOrExit(Hex2Bin(blobmsg_get_string(aArgs[0]), pskc.m8, sizeof(pskc)) == OT_PSKC_MAX_SIZE,
+-                     error = OT_ERROR_PARSE);
++        VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], pskc.m8, sizeof(pskc.m8)) > 0, error = OT_ERROR_PARSE);
+         SuccessOrExit(error = otThreadSetPskc(mHost->GetInstance(), &pskc));
+     }
+ exit:
+@@ -958,8 +950,8 @@ int UbusServer::HandleSetExtPanId(ubus_request_data *aRequest, blob_attr *(&aArg
+     if (aArgs[0] != nullptr)
+     {
+         otExtendedPanId extPanId;
+-        char           *input = blobmsg_get_string(aArgs[0]);
+-        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId)) >= 0, error = OT_ERROR_PARSE);
++        VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extPanId.m8, sizeof(extPanId.m8)) > 0,
++                     error = OT_ERROR_PARSE);
+         error = otThreadSetExtendedPanId(mHost->GetInstance(), &extPanId);
+     }
+ exit:
+@@ -1018,9 +1010,8 @@ int UbusServer::HandleMacFilterAdd(ubus_request_data *aRequest, blob_attr *(&aAr
+ 
+     if (aArgs[0] != nullptr)
+     {
+-        char *addr = blobmsg_get_string(aArgs[0]);
+-
+-        VerifyOrExit(Hex2Bin(addr, extAddr.m8, OT_EXT_ADDRESS_SIZE) == OT_EXT_ADDRESS_SIZE, error = OT_ERROR_PARSE);
++        VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extAddr.m8, sizeof(extAddr.m8)) > 0,
++                     error = OT_ERROR_PARSE);
+ 
+         error = otLinkFilterAddAddress(mHost->GetInstance(), &extAddr);
+ 
+@@ -1038,8 +1029,8 @@ int UbusServer::HandleMacFilterRemove(ubus_request_data *aRequest, blob_attr *(&
+ 
+     if (aArgs[0] != nullptr)
+     {
+-        char *addr = blobmsg_get_string(aArgs[0]);
+-        VerifyOrExit(Hex2Bin(addr, extAddr.m8, OT_EXT_ADDRESS_SIZE) == OT_EXT_ADDRESS_SIZE, error = OT_ERROR_PARSE);
++        VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extAddr.m8, sizeof(extAddr.m8)) > 0,
++                     error = OT_ERROR_PARSE);
+ 
+         otLinkFilterRemoveAddress(mHost->GetInstance(), &extAddr);
+         error = OT_ERROR_NONE;
+@@ -1165,57 +1156,6 @@ otError UbusServer::ParseLong(char *aString, long &aLong)
+     return (*endptr == '\0') ? OT_ERROR_NONE : OT_ERROR_PARSE;
+ }
+ 
+-int UbusServer::Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength)
+-{
+-    size_t      hexLength = strlen(aHex);
+-    const char *hexEnd    = aHex + hexLength;
+-    uint8_t    *cur       = aBin;
+-    uint8_t     numChars  = hexLength & 1;
+-    uint8_t     byte      = 0;
+-    int         rval;
+-
+-    VerifyOrExit((hexLength + 1) / 2 <= aBinLength, rval = -1);
+-
+-    while (aHex < hexEnd)
+-    {
+-        if ('A' <= *aHex && *aHex <= 'F')
+-        {
+-            byte |= 10 + (*aHex - 'A');
+-        }
+-        else if ('a' <= *aHex && *aHex <= 'f')
+-        {
+-            byte |= 10 + (*aHex - 'a');
+-        }
+-        else if ('0' <= *aHex && *aHex <= '9')
+-        {
+-            byte |= *aHex - '0';
+-        }
+-        else
+-        {
+-            ExitNow(rval = -1);
+-        }
+-
+-        aHex++;
+-        numChars++;
+-
+-        if (numChars >= 2)
+-        {
+-            numChars = 0;
+-            *cur++   = byte;
+-            byte     = 0;
+-        }
+-        else
+-        {
+-            byte <<= 4;
+-        }
+-    }
+-
+-    rval = static_cast<int>(cur - aBin);
+-
+-exit:
+-    return rval;
+-}
+-
+ // === UloopProcessor ===
+ 
+ UloopProcessor *UloopProcessor::sInstance = nullptr;
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index 60165981..bda458b3 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -170,17 +170,6 @@ private:
+      */
+     otError ParseLong(char *aString, long &aLong);
+ 
+-    /**
+-     * This method converts a hex string to binary.
+-     *
+-     * @param[in]  aHex        A pointer to the hex string.
+-     * @param[out] aBin        A pointer to where the binary representation is placed.
+-     * @param[in]  aBinLength  Maximum length of the binary representation.
+-     *
+-     * @returns The number of bytes in the binary representation.
+-     */
+-    int Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength);
+-
+     /**
+      * This method append result in message passed to ubus.
+      *
+diff --git a/src/openwrt/ubus/ubus_utils.cpp b/src/openwrt/ubus/ubus_utils.cpp
+index 5dc13ee0..feb6dc72 100644
+--- a/src/openwrt/ubus/ubus_utils.cpp
++++ b/src/openwrt/ubus/ubus_utils.cpp
+@@ -27,6 +27,9 @@
+  */
+ 
+ #include "openwrt/ubus/ubus_utils.hpp"
++#include "common/code_utils.hpp"
++
++#include <limits.h>
+ 
+ namespace otbr {
+ namespace ubus {
+@@ -45,5 +48,46 @@ int blobmsg_add_hex_string(blob_buf *aBuf, const char *aName, const uint8_t *aDa
+     return 0;
+ }
+ 
++static int HexDigit(char c)
++{
++    int result = -1;
++    if ('0' <= c && c <= '9')
++    {
++        result = c - '0';
++    }
++    else if ('a' <= c && c <= 'f')
++    {
++        result = c - 'a' + 10;
++    }
++    else if ('A' <= c && c <= 'F')
++    {
++        result = c - 'A' + 10;
++    }
++    return result;
++}
++
++int blobmsg_get_hex_string(blob_attr *aAttr, uint8_t *aOut, int aOutSize)
++{
++    VerifyOrReturn(aOut != nullptr && 0 <= aOutSize && aOutSize <= INT_MAX, -1);
++
++    char const *hex = blobmsg_get_string(aAttr); // handles null by returning null
++    VerifyOrReturn(hex != nullptr, -1);
++
++    size_t hexLength = strlen(hex);
++    VerifyOrReturn(hexLength % 2 == 0, -1);
++    size_t binLength = hexLength / 2;
++    VerifyOrReturn(binLength <= static_cast<size_t>(aOutSize), -1);
++
++    char const *hexEnd = hex + hexLength;
++    while (hex < hexEnd)
++    {
++        int hi = HexDigit(*hex++);
++        int lo = HexDigit(*hex++);
++        VerifyOrReturn(hi >= 0 && lo >= 0, -1);
++        *aOut++ = (hi << 4) | lo;
++    }
++    return binLength;
++}
++
+ } // namespace ubus
+ } // namespace otbr
+diff --git a/src/openwrt/ubus/ubus_utils.hpp b/src/openwrt/ubus/ubus_utils.hpp
+index dfd3c990..68b18d39 100644
+--- a/src/openwrt/ubus/ubus_utils.hpp
++++ b/src/openwrt/ubus/ubus_utils.hpp
+@@ -115,6 +115,18 @@ struct UbusMethodHandler
+ // Returns 0 on success, or -1 on error
+ int blobmsg_add_hex_string(blob_buf *aBuf, const char *aName, const uint8_t *aData, unsigned int aLength);
+ 
++// Like blobmsg_get_string(), but decodes the hex string into the provided output buffer.
++// An error is returned if the string contains invalid characters, or would decode to
++// more than aLength bytes. Returns the number of bytes decoded on success, or -1 on error.
++int blobmsg_get_hex_string(blob_attr *aAttr, uint8_t *aOut, int aOutSize);
++
++// Like blobmsg_get_hex_string(), but validates that exactly aOutSize bytes are decoded.
++inline int blobmsg_get_hex_string_fixed(blob_attr *aAttr, uint8_t *aOut, int aOutSize)
++{
++    VerifyOrReturn(blobmsg_get_hex_string(aAttr, aOut, aOutSize) == aOutSize, -1);
++    return aOutSize;
++}
++
+ } // namespace ubus
+ } // namespace otbr
+ 
+-- 
+2.50.1 (Apple Git-155)
+

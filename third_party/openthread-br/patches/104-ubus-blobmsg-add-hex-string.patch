@@ -1,0 +1,317 @@
+From 05b59334a5966b455115c88d21a7b8d4df3589fd Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Fri, 3 Oct 2025 17:49:01 +1300
+Subject: [PATCH] Ubus: Add blobmsg_add_hex_string for emitting hex values
+
+This replaces OutputBytes + blobmsg_add_string and uses
+blobmsg_alloc_string_buffer instead of an explicit buffer.
+---
+ src/openwrt/ubus/CMakeLists.txt |  1 +
+ src/openwrt/ubus/otubus.cpp     | 76 ++++++++-------------------------
+ src/openwrt/ubus/otubus.hpp     |  9 ----
+ src/openwrt/ubus/ubus_utils.cpp | 49 +++++++++++++++++++++
+ src/openwrt/ubus/ubus_utils.hpp |  4 ++
+ 5 files changed, 72 insertions(+), 67 deletions(-)
+ create mode 100644 src/openwrt/ubus/ubus_utils.cpp
+
+diff --git a/src/openwrt/ubus/CMakeLists.txt b/src/openwrt/ubus/CMakeLists.txt
+index 8e868f2b..714a759f 100644
+--- a/src/openwrt/ubus/CMakeLists.txt
++++ b/src/openwrt/ubus/CMakeLists.txt
+@@ -28,6 +28,7 @@
+ 
+ add_library(otbr-ubus
+     otubus.cpp
++    ubus_utils.cpp
+ )
+ target_link_libraries(otbr-ubus PRIVATE
+     otbr-config
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 05b7cf99..114d36bf 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -50,9 +50,6 @@ namespace ubus {
+ 
+ static constexpr uint32_t kDefaultJoinerTimeout = 120;
+ 
+-const static int XPANID_LENGTH     = 64;
+-const static int NETWORKKEY_LENGTH = 64;
+-
+ // === UbusServer ===
+ 
+ UbusServer::UbusServer(ubus_context &aContext, Host::RcpHost &aHost)
+@@ -96,16 +93,6 @@ void UbusServer::HandleActiveScanResult(otActiveScanResult *aResult, void *aCont
+     static_cast<UbusServer *>(aContext)->HandleActiveScanResultDetail(aResult);
+ }
+ 
+-void UbusServer::OutputBytes(const uint8_t *aBytes, uint8_t aLength, char *aOutput)
+-{
+-    char byte2char[5] = "";
+-    for (int i = 0; i < aLength; i++)
+-    {
+-        sprintf(byte2char, "%02x", aBytes[i]);
+-        strcat(aOutput, byte2char);
+-    }
+-}
+-
+ void UbusServer::AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest)
+ {
+     blobmsg_add_u16(&mBuf, "Error", aError);
+@@ -116,8 +103,6 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+ {
+     void *jsonList = nullptr;
+ 
+-    char xpanidstring[XPANID_LENGTH] = "";
+-
+     if (aResult == nullptr)
+     {
+         blobmsg_close_array(&mScanBuf, mScanArray);
+@@ -130,16 +115,10 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+     jsonList = blobmsg_open_table(&mScanBuf, nullptr);
+ 
+     blobmsg_add_string(&mScanBuf, "NetworkName", aResult->mNetworkName.m8);
+-
+-    OutputBytes(aResult->mExtendedPanId.m8, OT_EXT_PAN_ID_SIZE, xpanidstring);
+-    blobmsg_add_string(&mScanBuf, "ExtendedPanId", xpanidstring);
+-
++    blobmsg_add_hex_string(&mScanBuf, "ExtendedPanId", aResult->mExtendedPanId.m8, OT_EXT_PAN_ID_SIZE);
+     blobmsg_printf(&mScanBuf, "PanId", "0x%04x", aResult->mPanId);
+-
+     blobmsg_add_u32(&mScanBuf, "Channel", aResult->mChannel);
+-
+     blobmsg_add_u32(&mScanBuf, "Rssi", aResult->mRssi);
+-
+     blobmsg_add_u32(&mScanBuf, "Lqi", aResult->mLqi);
+ 
+     blobmsg_close_table(&mScanBuf, jsonList);
+@@ -212,21 +191,18 @@ int UbusServer::HandleParent(ubus_request_data *aRequest)
+ {
+     otError      error = OT_ERROR_NONE;
+     otRouterInfo parentInfo;
+-    char         extAddress[XPANID_LENGTH] = "";
+-    void        *jsonList                  = nullptr;
+-    void        *jsonArray                 = nullptr;
++    void        *jsonList  = nullptr;
++    void        *jsonArray = nullptr;
+ 
+     SuccessOrExit(error = otThreadGetParentInfo(mHost->GetInstance(), &parentInfo));
+ 
+     jsonArray = blobmsg_open_array(&mBuf, "parent_list");
+     jsonList  = blobmsg_open_table(&mBuf, "parent");
++
+     blobmsg_add_string(&mBuf, "Role", "R");
+     blobmsg_printf(&mBuf, "Rloc16", "0x%04x", parentInfo.mRloc16);
+     blobmsg_printf(&mBuf, "Age", "%3d", parentInfo.mAge);
+-
+-    OutputBytes(parentInfo.mExtAddress.m8, sizeof(parentInfo.mExtAddress.m8), extAddress);
+-    blobmsg_add_string(&mBuf, "ExtAddress", extAddress);
+-
++    blobmsg_add_hex_string(&mBuf, "ExtAddress", parentInfo.mExtAddress.m8, sizeof(parentInfo.mExtAddress.m8));
+     blobmsg_add_u16(&mBuf, "LinkQualityIn", parentInfo.mLinkQualityIn);
+ 
+     blobmsg_close_table(&mBuf, jsonList);
+@@ -241,11 +217,10 @@ int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+ {
+     otError                error = OT_ERROR_NONE;
+     otNeighborInfo         neighborInfo;
+-    otNeighborInfoIterator iterator                  = OT_NEIGHBOR_INFO_ITERATOR_INIT;
+-    void                  *jsonList                  = nullptr;
+-    void                  *jsonTable                 = nullptr;
+-    char                   mode[5]                   = "";
+-    char                   extAddress[XPANID_LENGTH] = "";
++    otNeighborInfoIterator iterator  = OT_NEIGHBOR_INFO_ITERATOR_INIT;
++    void                  *jsonList  = nullptr;
++    void                  *jsonTable = nullptr;
++    char                   mode[5]   = "";
+ 
+     jsonList = blobmsg_open_array(&mBuf, "neighbor_list");
+ 
+@@ -274,16 +249,12 @@ int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+             strcat(mode, "n");
+         }
+         blobmsg_add_string(&mBuf, "Mode", mode);
+-
+-        OutputBytes(neighborInfo.mExtAddress.m8, sizeof(neighborInfo.mExtAddress.m8), extAddress);
+-        blobmsg_add_string(&mBuf, "ExtAddress", extAddress);
+-
++        blobmsg_add_hex_string(&mBuf, "ExtAddress", neighborInfo.mExtAddress.m8, sizeof(neighborInfo.mExtAddress.m8));
+         blobmsg_add_u16(&mBuf, "LinkQualityIn", neighborInfo.mLinkQualityIn);
+ 
+         blobmsg_close_table(&mBuf, jsonTable);
+ 
+         memset(mode, 0, sizeof(mode));
+-        memset(extAddress, 0, sizeof(extAddress));
+     }
+ 
+     blobmsg_close_array(&mBuf, jsonList);
+@@ -568,34 +539,28 @@ int UbusServer::HandleRloc16(ubus_request_data *aRequest)
+ 
+ int UbusServer::HandleNetworkKey(ubus_request_data *aRequest)
+ {
+-    char         outputKey[NETWORKKEY_LENGTH] = "";
+     otNetworkKey key;
+ 
+     otThreadGetNetworkKey(mHost->GetInstance(), &key);
+-    OutputBytes(key.m8, OT_NETWORK_KEY_SIZE, outputKey);
+-    blobmsg_add_string(&mBuf, "Networkkey", outputKey);
++    blobmsg_add_hex_string(&mBuf, "Networkkey", key.m8, OT_NETWORK_KEY_SIZE);
+     AppendResult(OT_ERROR_NONE, &mContext, aRequest);
+     return 0;
+ }
+ 
+ int UbusServer::HandlePskc(ubus_request_data *aRequest)
+ {
+-    char   outputPskc[NETWORKKEY_LENGTH] = "";
+     otPskc pskc;
+ 
+     otThreadGetPskc(mHost->GetInstance(), &pskc);
+-    OutputBytes(pskc.m8, OT_PSKC_MAX_SIZE, outputPskc);
+-    blobmsg_add_string(&mBuf, "pskc", outputPskc);
++    blobmsg_add_hex_string(&mBuf, "pskc", pskc.m8, OT_PSKC_MAX_SIZE);
+     AppendResult(OT_ERROR_NONE, &mContext, aRequest);
+     return 0;
+ }
+ 
+ int UbusServer::HandleExtPanId(ubus_request_data *aRequest)
+ {
+-    char           outputExtPanId[XPANID_LENGTH] = "";
+     const uint8_t *extPanId = reinterpret_cast<const uint8_t *>(otThreadGetExtendedPanId(mHost->GetInstance()));
+-    OutputBytes(extPanId, OT_EXT_PAN_ID_SIZE, outputExtPanId);
+-    blobmsg_add_string(&mBuf, "ExtPanId", outputExtPanId);
++    blobmsg_add_hex_string(&mBuf, "ExtPanId", extPanId, OT_EXT_PAN_ID_SIZE);
+     AppendResult(OT_ERROR_NONE, &mContext, aRequest);
+     return 0;
+ }
+@@ -691,15 +656,12 @@ int UbusServer::HandleJoinerNum(ubus_request_data *aRequest)
+     void        *jsonTable = nullptr;
+     void        *jsonArray = nullptr;
+     otJoinerInfo joinerInfo;
+-    uint16_t     iterator        = 0;
+-    int          joinerNum       = 0;
+-    char         eui64[EXTPANID] = "";
++    uint16_t     iterator  = 0;
++    int          joinerNum = 0;
+ 
+     jsonArray = blobmsg_open_array(&mBuf, "joinerList");
+     while (otCommissionerGetNextJoinerInfo(mHost->GetInstance(), &iterator, &joinerInfo) == OT_ERROR_NONE)
+     {
+-        memset(eui64, 0, sizeof(eui64));
+-
+         jsonTable = blobmsg_open_table(&mBuf, nullptr);
+ 
+         blobmsg_add_string(&mBuf, "pskd", joinerInfo.mPskd.m8);
+@@ -711,8 +673,8 @@ int UbusServer::HandleJoinerNum(ubus_request_data *aRequest)
+             break;
+         case OT_JOINER_INFO_TYPE_EUI64:
+             blobmsg_add_u16(&mBuf, "isAny", 0);
+-            OutputBytes(joinerInfo.mSharedId.mEui64.m8, sizeof(joinerInfo.mSharedId.mEui64.m8), eui64);
+-            blobmsg_add_string(&mBuf, "eui64", eui64);
++            blobmsg_add_hex_string(&mBuf, "eui64", joinerInfo.mSharedId.mEui64.m8,
++                                   sizeof(joinerInfo.mSharedId.mEui64.m8));
+             break;
+         case OT_JOINER_INFO_TYPE_DISCERNER:
+             blobmsg_add_u16(&mBuf, "isAny", 0);
+@@ -767,9 +729,7 @@ int UbusServer::HandleMacFilterAddr(ubus_request_data *aRequest)
+ 
+     while (otLinkFilterGetNextAddress(mHost->GetInstance(), &iterator, &entry) == OT_ERROR_NONE)
+     {
+-        char extAddress[XPANID_LENGTH] = "";
+-        OutputBytes(entry.mExtAddress.m8, sizeof(entry.mExtAddress.m8), extAddress);
+-        blobmsg_add_string(&mBuf, "addr", extAddress);
++        blobmsg_add_hex_string(&mBuf, "addr", entry.mExtAddress.m8, sizeof(entry.mExtAddress.m8));
+     }
+ 
+     blobmsg_close_array(&mBuf, jsonArray);
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index 475f1e94..60165981 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -181,15 +181,6 @@ private:
+      */
+     int Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength);
+ 
+-    /**
+-     * This method output bytes into char*.
+-     *
+-     * @param[in]  aBytes   A pointer to the bytes need to be convert.
+-     * @param[in]  aLength  The length of the bytes.
+-     * @param[out] aOutput  A pointer to the char* string.
+-     */
+-    void OutputBytes(const uint8_t *aBytes, uint8_t aLength, char *aOutput);
+-
+     /**
+      * This method append result in message passed to ubus.
+      *
+diff --git a/src/openwrt/ubus/ubus_utils.cpp b/src/openwrt/ubus/ubus_utils.cpp
+new file mode 100644
+index 00000000..5dc13ee0
+--- /dev/null
++++ b/src/openwrt/ubus/ubus_utils.cpp
+@@ -0,0 +1,49 @@
++/*
++ *  Copyright (c) 2026, The OpenThread Authors.
++ *  All rights reserved.
++ *
++ *  Redistribution and use in source and binary forms, with or without
++ *  modification, are permitted provided that the following conditions are met:
++ *  1. Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *  2. Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *  3. Neither the name of the copyright holder nor the
++ *     names of its contributors may be used to endorse or promote products
++ *     derived from this software without specific prior written permission.
++ *
++ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ *  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ *  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ *  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ *  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ *  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ *  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ *  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ *  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ *  POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "openwrt/ubus/ubus_utils.hpp"
++
++namespace otbr {
++namespace ubus {
++
++int blobmsg_add_hex_string(blob_buf *aBuf, const char *aName, const uint8_t *aData, unsigned int aLength)
++{
++    VerifyOrReturn(aLength > 0, blobmsg_add_string(aBuf, aName, ""));
++    char *hex = static_cast<char *>(blobmsg_alloc_string_buffer(aBuf, aName, aLength * 2 + 1));
++    VerifyOrReturn(hex != nullptr, -1);
++
++    for (unsigned int i = 0; i < aLength; i++)
++    {
++        snprintf(&hex[i * 2], 3, "%02x", aData[i]);
++    }
++    blobmsg_add_string_buffer(aBuf);
++    return 0;
++}
++
++} // namespace ubus
++} // namespace otbr
+diff --git a/src/openwrt/ubus/ubus_utils.hpp b/src/openwrt/ubus/ubus_utils.hpp
+index 74a8da29..dfd3c990 100644
+--- a/src/openwrt/ubus/ubus_utils.hpp
++++ b/src/openwrt/ubus/ubus_utils.hpp
+@@ -111,6 +111,10 @@ struct UbusMethodHandler
+ #define OTBR_UBUS_METHOD(NAME, METHOD, POLICY) \
+     UBUS_METHOD(NAME, (UbusMethodHandler::Adapter<decltype(METHOD), METHOD, decltype(POLICY), POLICY>()), POLICY)
+ 
++// Like blobmsg_add_string(), but hex-encodes the specified data first.
++// Returns 0 on success, or -1 on error
++int blobmsg_add_hex_string(blob_buf *aBuf, const char *aName, const uint8_t *aData, unsigned int aLength);
++
+ } // namespace ubus
+ } // namespace otbr
+ 
+-- 
+2.50.1 (Apple Git-155)
+

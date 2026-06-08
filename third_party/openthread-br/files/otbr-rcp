@@ -171,7 +171,7 @@ update_rcp() {  # rcpdev rcptty rcpurl
 
 	# Use uart-exclusive to ensure we don't interfere with a running otbr-agent
 	log debug "Determining current firmware for USB device $rcpdev ($rcptty)"
-	local currentfw="$("$AGENT_PROG" --radio-version "${rcpurl}?uart-exclusive" 2>/dev/null)"
+	local currentfw="$("$AGENT_PROG" -s -d3 --radio-version "${rcpurl}?uart-exclusive" 2>/dev/null)"
 	if [ -z "$currentfw" ]; then
 		log notice "Not updating USB device $rcpdev, unable to determine current firmware version"
 		return 0
