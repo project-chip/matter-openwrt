@@ -19,7 +19,7 @@ PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 
 PKG_HOST_ONLY:=1
-PKG_BUILD_DEPENDS:=python3/host
+HOST_BUILD_DEPENDS:=python3/host
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/host-build.mk
