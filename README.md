@@ -11,7 +11,7 @@ Matter is a unified, open-source application-layer connectivity standard built t
 This repository is intended to be included as a package feed in an OpenWrt buildroot, and familiarity with the configuration and use of the OpenWrt build system is assumed in the following instructions. Please refer to the [OpenWrt Developer Guide](https://openwrt.org/docs/guide-developer/start) for general guidance on building an OpenWrt system.
 
 Note that this repository is aimed primarily at Matter implementers and OpenWrt integrators, and provides source packages only.
-The general policy for the packages in this feed is to target the latest stable release of OpenWrt, currently this is the **24.10.x** line of releases.
+The general policy for the packages in this feed is to target the latest stable release of OpenWrt, currently this is the **25.12.x** line of releases.
 
 ### Adding the feed
 
@@ -39,6 +39,10 @@ CONFIG_MBEDTLS_CCM_C=y
 
 Note that this requires the mbedtls package from the OpenWrt core to be rebuilt with the MBEDTLS_CCM_C option enabled.
 Alternatively, the matter-netman-openssl variant of the package can be used which depends on OpenSSL.
+
+## Contributing
+
+Want to contribute? Great! Please refer to the [Contributing to Matter](https://github.com/project-chip/connectedhomeip/blob/master/CONTRIBUTING.md) guide in the main Matter SDK repository for details.
 
 ## License
 

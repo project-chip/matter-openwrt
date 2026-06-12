@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Project CHIP Authors
+# Copyright (c) 2023-2026 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,6 +48,8 @@ define BuildPackageOverlay/Build
 	rm -rf $$(OVERLAY_DIR)
 endef
 
+# Base packages should be directly in feeds/base, but before OpenWrt 25 that path can
+# point to the root of a core repo working copy, requiring an additional package/ suffix.
 overlay_base=$(or $(call overlay_find_core,$(1)),$(error Unable to locate core package '$(1)' (missing base feed?)))
-overlay_find_core=$(firstword $(foreach p,package/$(1) feeds/base/package/$(1),$(if $(wildcard $(TOPDIR)/$(p)/Makefile),$(p))))
+overlay_find_core=$(firstword $(foreach p,feeds/base/$(1) feeds/base/package/$(1),$(if $(wildcard $(TOPDIR)/$(p)/Makefile),$(p))))
 overlay_hash=$(shell find $(1) -type f -not -name '.*' | sort | mkhash md5)

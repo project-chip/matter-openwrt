@@ -1,26 +1,36 @@
-commit b55da5a120d01b19ec9f17ea3873f2fa9c674510
-Author: Karsten Sperling <ksperling@apple.com>
-Date:   Thu Jan 29 13:01:03 2026 +1300
+From 1aff52555b55e5f3ad86e6f21c56e46161a729ef Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 29 Jan 2026 13:01:03 +1300
+Subject: [PATCH] Add basic support for an RGB status LED
 
-    Add basic support for an RGB status LED
+---
+ src/CMakeLists.txt               |   7 +++
+ src/src/platform-nrf5.h          |  44 +++++++++++++
+ src/src/radio.c                  |   2 +
+ src/src/status_led.c             | 102 +++++++++++++++++++++++++++++++
+ src/src/system.c                 |  10 ++-
+ src/src/transport/usb-cdc-uart.c |   2 +
+ 6 files changed, 166 insertions(+), 1 deletion(-)
+ create mode 100644 src/src/status_led.c
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index fffb99b..8d2b455 100644
+index fffb99b..f7fca4c 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -39,6 +39,11 @@ else()
+@@ -39,6 +39,12 @@ else()
      endif()
  endif()
  
 +option(OT_STATUS_LED_PINS "Status LED pin configuration (R,G,B)" "")
 +if(OT_STATUS_LED_PINS)
 +    list(APPEND OT_PLATFORM_DEFINES "STATUS_LED_PINS=${OT_STATUS_LED_PINS}")
++    list(APPEND OT_PLATFORM_DEFINES "OPENTHREAD_CONFIG_PLATFORM_ASSERT_MANAGEMENT=1")
 +endif()
 +
  set(NRF_COMM_SOURCES
      src/alarm.c
      src/crypto.c
-@@ -49,6 +54,7 @@ set(NRF_COMM_SOURCES
+@@ -49,6 +55,7 @@ set(NRF_COMM_SOURCES
      src/logging.c
      src/misc.c
      src/radio.c
@@ -28,19 +38,73 @@ index fffb99b..8d2b455 100644
      src/system.c
      src/temp.c
  )
+diff --git a/src/src/platform-nrf5.h b/src/src/platform-nrf5.h
+index 2034a2f..6243a32 100644
+--- a/src/src/platform-nrf5.h
++++ b/src/src/platform-nrf5.h
+@@ -38,6 +38,7 @@
+ #include <stdint.h>
+ 
+ #include <openthread/instance.h>
++#include <nrf.h>
+ 
+ #include "platform-config.h"
+ 
+@@ -183,6 +184,49 @@ void nrf5TempProcess(void);
+  */
+ int32_t nrf5TempGet(void);
+ 
++/**
++ * Status LED color constants (0xRRGGBB format).
++ */
++#define STATUS_COLOR_INITIALIZING   0x663300
++#define STATUS_COLOR_RADIO_DISABLED 0x000044
++#define STATUS_COLOR_RADIO_ENABLED  0x0000ff
++#define STATUS_COLOR_FATAL_ERROR    0x880088
++
++#ifdef STATUS_LED_PINS
++
++/**
++ * Set the status RGB LED color, in 0xRRGGBB format (e.g. 0xFF8000 is orange).
++ * Uses hardware PWM for smooth color control with 8-bit resolution per channel.
++ *
++ * To enable support, STATUS_LED_PINS needs to be defined to a triple of
++ * (port,pin) pairs (see NRF_GPIO_PIN_MAP) at compile time, e.g.
++ * -DSTATUS_LED_PINS="(0,23),(0,22),(0,24)", assumed to be active low.
++ *
++ * STATUS_LED_PWM and STATUS_LED_PWM_FREQUENCY can be used to configure the
++ * PWM instance and frequency; the defaults are NRF_PWM0 and NRF_PWM_CLK_4MHz.
++ */
++void nrf5SetStatusLed(int color);
++
++/**
++ * Signal a fatal platform error.  Flashes the status LED pink for a few
++ * seconds and then resets the device via NVIC_SystemReset().
++ */
++void nrf5PlatformDie(void);
++
++#else
++
++static inline void nrf5SetStatusLed(int color)
++{
++    (void)color;
++}
++
++static inline void nrf5PlatformDie(void)
++{
++    NVIC_SystemReset();
++}
++
++#endif // STATUS_LED_PINS
++
+ #if SOFTDEVICE_PRESENT
+ /**
+  * Function for translating SoftDevice error into OpenThread's one.
 diff --git a/src/src/radio.c b/src/src/radio.c
-index a626f68..0490d99 100644
+index a626f68..f5fd0ba 100644
 --- a/src/src/radio.c
 +++ b/src/src/radio.c
-@@ -56,6 +56,7 @@
- #include "openthread-system.h"
- #include "platform-fem.h"
- #include "platform-nrf5.h"
-+#include "status_led.h"
- 
- #include <nrf.h>
- #include <nrf_802154.h>
-@@ -446,6 +447,7 @@ otError otPlatRadioEnable(otInstance *aInstance)
+@@ -446,6 +446,7 @@ otError otPlatRadioEnable(otInstance *aInstance)
      {
          sDisabled = false;
          error     = OT_ERROR_NONE;
@@ -48,7 +112,7 @@ index a626f68..0490d99 100644
      }
      else
      {
-@@ -464,6 +466,7 @@ otError otPlatRadioDisable(otInstance *aInstance)
+@@ -464,6 +465,7 @@ otError otPlatRadioDisable(otInstance *aInstance)
                      error = OT_ERROR_INVALID_STATE);
  
      sDisabled = true;
@@ -58,18 +122,20 @@ index a626f68..0490d99 100644
      return error;
 diff --git a/src/src/status_led.c b/src/src/status_led.c
 new file mode 100644
-index 0000000..f25afce
+index 0000000..9746dda
 --- /dev/null
 +++ b/src/src/status_led.c
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,102 @@
 +
-+#include "status_led.h"
++#include "platform-nrf5.h"
++#include <openthread-core-config.h>
 +
 +#ifdef STATUS_LED_PINS
 +
-+#include <nrf.h>
 +#include <hal/nrf_gpio.h>
 +#include <hal/nrf_pwm.h>
++#include <nrf.h>
++#include <nrf_delay.h>
 +
 +// Default PWM configuration
 +#ifndef STATUS_LED_PWM
@@ -80,8 +146,8 @@ index 0000000..f25afce
 +#endif
 +
 +// Extract a pin from a pin map tuple
-+#define SELECT_GPIO_PIN(i, ...)  SELECT_GPIO_PIN_##i(__VA_ARGS__)
-+#define SELECT_GPIO_PIN_0(p1, ...)   NRF_GPIO_PIN_MAP p1
++#define SELECT_GPIO_PIN(i, ...) SELECT_GPIO_PIN_##i(__VA_ARGS__)
++#define SELECT_GPIO_PIN_0(p1, ...) NRF_GPIO_PIN_MAP p1
 +#define SELECT_GPIO_PIN_1(p1, p2, ...) NRF_GPIO_PIN_MAP p2
 +#define SELECT_GPIO_PIN_2(p1, p2, p3, ...) NRF_GPIO_PIN_MAP p3
 +
@@ -93,25 +159,23 @@ index 0000000..f25afce
 +void nrf5SetStatusLed(int color)
 +{
 +    // PWM sequence data, must be in RAM for DMA access
-+    static nrf_pwm_values_individual_t pwm_values = { 0 };
-+    static nrf_pwm_sequence_t const pwm_seq = {
-+        .values.p_individual = &pwm_values,
-+        .length              = NRF_PWM_VALUES_LENGTH(pwm_values),
-+        .repeats             = 0,
-+        .end_delay           = 0
++    static nrf_pwm_values_individual_t pwm_values = {0};
++    static nrf_pwm_sequence_t const    pwm_seq    = {
++              .values.p_individual = &pwm_values,
++              .length              = NRF_PWM_VALUES_LENGTH(pwm_values),
++              .repeats             = 0,
++              .end_delay           = 0,
 +    };
 +
 +    static bool initialized = false;
 +    if (!initialized)
 +    {
 +        // Configure pins for output and initialize to high (LEDs are active low)
-+        uint32_t pins[] = {
-+            SELECT_GPIO_PIN(0, STATUS_LED_PINS), // R
-+            SELECT_GPIO_PIN(1, STATUS_LED_PINS), // G
-+            SELECT_GPIO_PIN(2, STATUS_LED_PINS), // B
-+            NRF_PWM_PIN_NOT_CONNECTED
-+        };
-+        for (int i=0; i<3; i++)
++        uint32_t pins[] = {SELECT_GPIO_PIN(0, STATUS_LED_PINS), // R
++                           SELECT_GPIO_PIN(1, STATUS_LED_PINS), // G
++                           SELECT_GPIO_PIN(2, STATUS_LED_PINS), // B
++                           NRF_PWM_PIN_NOT_CONNECTED};
++        for (int i = 0; i < 3; i++)
 +        {
 +            nrf_gpio_pin_set(pins[i]);
 +            nrf_gpio_cfg_output(pins[i]);
@@ -132,70 +196,73 @@ index 0000000..f25afce
 +
 +    // MSB controls polarity, 0 = RisingEdge aligns with active low LEDs
 +    pwm_values.channel_0 = srgbToLinear((color >> 16) & 0xff); // R
-+    pwm_values.channel_1 = srgbToLinear((color >>  8) & 0xff); // G
-+    pwm_values.channel_2 = srgbToLinear((color >>  0) & 0xff); // B
++    pwm_values.channel_1 = srgbToLinear((color >> 8) & 0xff);  // G
++    pwm_values.channel_2 = srgbToLinear((color >> 0) & 0xff);  // B
 +    nrf_pwm_task_trigger(STATUS_LED_PWM, NRF_PWM_TASK_SEQSTART0);
 +}
 +
-+#endif // STATUS_LED_PINS
-diff --git a/src/src/status_led.h b/src/src/status_led.h
-new file mode 100644
-index 0000000..2ec7cda
---- /dev/null
-+++ b/src/src/status_led.h
-@@ -0,0 +1,30 @@
-+#ifndef STATUS_LED_H_
-+#define STATUS_LED_H_
++void nrf5PlatformDie(void)
++{
++    for (int i = 0; i < 8; i++)
++    {
++        nrf5SetStatusLed(STATUS_COLOR_FATAL_ERROR);
++        nrf_delay_ms(200);
++        nrf5SetStatusLed(0);
++        nrf_delay_ms(200);
++    }
++    nrf5SetStatusLed(STATUS_COLOR_FATAL_ERROR);
++    nrf_delay_ms(1800);
 +
-+#include <stdint.h>
-+
-+#define STATUS_COLOR_INITIALIZING   0xffcc00
-+#define STATUS_COLOR_RADIO_DISABLED 0x000044
-+#define STATUS_COLOR_RADIO_ENABLED  0x0000ff
-+
-+#ifdef STATUS_LED_PINS
-+
-+/**
-+ * Set the status RGB LED color, in 0xRRGGBB format (e.g. 0xFF8000 is orange).
-+ * Uses hardware PWM for smooth color control with 8-bit resolution per channel.
-+ *
-+ * To enable support, STATUS_LED_PINS needs to be defined to a triple of
-+ * (port,pin) pairs (see NRF_GPIO_PIN_MAP) at compile time, e.g.
-+ * -DSTATUS_LED_PINS="(0,23),(0,22),(0,24)", assumed to be active low.
-+ * 
-+ * STATUS_LED_PWM and STATUS_LED_PWM_FREQUENCY can be used to configure the
-+ * PWM instance and frequence; the defaults are NRF_PWM0 and NRF_PWM_CLK_4MHz.
-+ */
-+void nrf5SetStatusLed(int color);
-+
-+#else
-+
-+static inline void nrf5SetStatusLed(int color) { (void)color; }
++    NVIC_SystemReset();
++}
 +
 +#endif // STATUS_LED_PINS
-+#endif // STATUS_LED_H_
++
++#if OPENTHREAD_CONFIG_PLATFORM_ASSERT_MANAGEMENT
++#include <openthread/platform/misc.h>
++
++void otPlatAssertFail(const char *aFilename, int aLineNumber)
++{
++    (void)aFilename;
++    (void)aLineNumber;
++    nrf5PlatformDie();
++}
++#endif
 diff --git a/src/src/system.c b/src/src/system.c
-index 025bf4e..cd1582b 100644
+index 025bf4e..8c3c36c 100644
 --- a/src/src/system.c
 +++ b/src/src/system.c
-@@ -41,6 +41,7 @@
- #include "platform-fem.h"
+@@ -42,6 +42,7 @@
  #include "platform-nrf5-transport.h"
  #include "platform-nrf5.h"
-+#include "status_led.h"
  #include <nrf.h>
++#include <nrf_delay.h>
  #include <nrf_drv_clock.h>
  
-@@ -72,6 +73,8 @@ void otSysInit(int argc, char *argv[])
+ #include <openthread/config.h>
+@@ -59,7 +60,7 @@ extern bool gPlatformPseudoResetWasRequested;
+ 
+ void __cxa_pure_virtual(void)
+ {
+-    while (1);
++    nrf5PlatformDie();
+ }
+ 
+ void otSysInit(int argc, char *argv[])
+@@ -72,6 +73,12 @@ void otSysInit(int argc, char *argv[])
          otSysDeinit();
      }
  
++    // Add some brief delays so a reset loop (LED flashing)
++    // can be distinguished from a hang (LED solid on).
++    nrf_delay_ms(50);
 +    nrf5SetStatusLed(STATUS_COLOR_INITIALIZING);
++    nrf_delay_ms(50);
 +
  #if ((!SOFTDEVICE_PRESENT) && (NRF52840_XXAA))
      // Enable I-code cache
      NRF_NVMC->ICACHECNF = NVMC_ICACHECNF_CACHEEN_Enabled;
-@@ -104,6 +107,7 @@ void otSysInit(int argc, char *argv[])
+@@ -104,6 +111,7 @@ void otSysInit(int argc, char *argv[])
      nrf5FemInit();
      nrf5CryptoInit();
  
@@ -203,3 +270,26 @@ index 025bf4e..cd1582b 100644
      gPlatformPseudoResetWasRequested = false;
  }
  
+diff --git a/src/src/transport/usb-cdc-uart.c b/src/src/transport/usb-cdc-uart.c
+index ee8d230..f34fe65 100644
+--- a/src/src/transport/usb-cdc-uart.c
++++ b/src/src/transport/usb-cdc-uart.c
+@@ -61,6 +61,7 @@
+ #include "class/cdc/acm/app_usbd_cdc_acm.h"
+ 
+ #if defined(UF2_BOOTLOADER_ENABLED) && UF2_BOOTLOADER_ENABLED
++#include "platform-nrf5.h"
+ #include <nrf_delay.h>
+ #ifdef SOFTDEVICE_PRESENT
+ #include <nrf_soc.h>
+@@ -290,6 +291,7 @@ static void checkUf2BootloaderTrigger(void)
+             // gives the host's USB controller time to fully process the disconnect
+             // before the bootloader re-asserts the pullup. Without this delay, some
+             // xHCI controllers sporadically fail to re-detect the device promptly.
++            nrf5SetStatusLed(STATUS_COLOR_INITIALIZING);
+             nrf_usbd_pullup_disable();
+             nrf_delay_ms(1000);
+ #ifdef SOFTDEVICE_PRESENT
+-- 
+2.50.1 (Apple Git-155)
+

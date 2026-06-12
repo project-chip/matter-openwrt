@@ -15,13 +15,15 @@
  */
 
 #include <ctype.h>
-#include <errno.h>
 #include <endian.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -52,6 +54,18 @@ static int reset(char const *device) {
         return 2;
     }
 
+    if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
+        log_error("flock");
+        goto failed;
+    }
+
+#ifdef TIOCEXCL
+    if (ioctl(fd, TIOCEXCL) == -1) {
+        log_error("ioctl(TIOCEXCL)");
+        goto failed;
+    }
+#endif
+
     struct termios tio;
     if (tcgetattr(fd, &tio) < 0) {
         log_error("tcgetattr");
@@ -60,14 +74,36 @@ static int reset(char const *device) {
 
     cfsetispeed(&tio, B1200);
     cfsetospeed(&tio, B1200);
+    tio.c_cflag &= ~HUPCL;
 
-    if (tcsetattr(fd, TCSAFLUSH, &tio) < 0) {
+    if (tcsetattr(fd, TCSANOW, &tio) < 0) {
         log_error("tcsetattr");
         goto failed;
     }
 
-    usleep(10000); // allow a moment for the device to notice the change
-    close(fd);
+    // Wait for the device to reset, and for the USB stack to detect the disconnect.
+    // Without this, close() will try to send SET_CONTROL_LINE_STATE to a device that's
+    // resetting but not yet marked disconnected by the xHCI controller, causing a 5s
+    // timeout and preventing the kernel from re-enumerating the device. This may cause
+    // the bootloader on the device to also time out and relaunch the application instead.
+    for (int t = 0;; t++) {
+        usleep(1000); // 1ms intervals, up to 2s
+        if (t >= 2000) {
+            fprintf(stderr, "timeout\n");
+            fd = -1; // skip close() since it may block
+            goto failed;
+        }
+        if (tcgetattr(fd, &tio) < 0) {
+            if (errno == EIO) {
+                break; // device disconnected
+            } else if (errno != EINTR && errno != EAGAIN) {
+                log_error("polling tcgetattr");
+                break; // some other error, give up anyway
+            }
+        }
+    }
+
+    // Skip close(fd) since it may still block; the kernel will handle cleanup.
     return 0;
 
 failed:
@@ -117,7 +153,7 @@ static int convert(uint32_t family, uint32_t base, char const *bin, char const *
     const uint32_t chunk_size = 256;
     uint32_t num_blocks = (file_size + chunk_size - 1) / chunk_size;
 
-    struct uf2_block block = { 0 };
+    struct uf2_block block = {0};
     block.magic_start0 = htole32(0x0A324655);
     block.magic_start1 = htole32(0x9E5D5157);
     block.magic_end = htole32(0x0AB16F30);

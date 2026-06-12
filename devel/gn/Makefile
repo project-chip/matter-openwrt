@@ -17,7 +17,6 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=gn
 PKG_SOURCE_URL:=https://gn.googlesource.com/gn
 PKG_SOURCE_PROTO:=git-with-metadata
-PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 
 PKG_SOURCE_DATE:=2025-03-21
 PKG_SOURCE_VERSION:=6e8e0d6d4a151ab2ed9b4a35366e630c55888444

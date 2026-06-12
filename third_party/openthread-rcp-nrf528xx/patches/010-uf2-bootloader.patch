@@ -1,8 +1,13 @@
-commit 5fa897db7870c86047ee9d29021434180c05f171
-Author: Karsten Sperling <ksperling@apple.com>
-Date:   Wed Jan 28 16:58:58 2026 +1300
+From e9727a7932fd5749911ae5881e4bc9f01de0457e Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 28 Jan 2026 16:58:58 +1300
+Subject: [PATCH] Add support for UF2 boot loader with "1200 baud touch" reset.
 
-    Add support for UF2 boot loader with "1200 baud touch" reset
+---
+ src/nrf52840/nrf52840.cmake                   |  7 +-
+ src/src/transport/usb-cdc-uart.c              | 77 +++++++++++++++++--
+ .../NordicSemiconductor/CMakeLists.txt        |  1 -
+ 3 files changed, 76 insertions(+), 9 deletions(-)
 
 diff --git a/src/nrf52840/nrf52840.cmake b/src/nrf52840/nrf52840.cmake
 index 85226e1..ad68d48 100644
@@ -37,21 +42,49 @@ index 85226e1..ad68d48 100644
      -DUSE_APP_CONFIG=1
      -Wno-unused-parameter
 diff --git a/src/src/transport/usb-cdc-uart.c b/src/src/transport/usb-cdc-uart.c
-index 5bcb091..7640a3b 100644
+index 5bcb091..ee8d230 100644
 --- a/src/src/transport/usb-cdc-uart.c
 +++ b/src/src/transport/usb-cdc-uart.c
-@@ -60,6 +60,10 @@
+@@ -60,6 +60,15 @@
  #include "nrf_drv_power.h"
  #include "class/cdc/acm/app_usbd_cdc_acm.h"
  
 +#if defined(UF2_BOOTLOADER_ENABLED) && UF2_BOOTLOADER_ENABLED
-+#include "hal/nrf_power.h"
++#include <nrf_delay.h>
++#ifdef SOFTDEVICE_PRESENT
++#include <nrf_soc.h>
++#else
++#include <hal/nrf_power.h>
++#endif
 +#endif
 +
  #if (USB_CDC_AS_SERIAL_TRANSPORT == 1)
  
  static void cdcAcmUserEventHandler(app_usbd_class_inst_t const *aInstance, app_usbd_cdc_acm_user_event_t aEvent);
-@@ -260,6 +264,30 @@ static void processTransmit(void)
+@@ -209,15 +218,15 @@ static void processConnection(void)
+         }
+     }
+ 
+-    // Provide some delay so the OS can re-enumerate the device in case of reset.
+-    if (sUsbState.mReadyToStart)
++    // Only consume mReadyToStart once USBD is enabled. POWER_DETECTED/POWER_READY
++    // may arrive synchronously during nrf5UartInit() (via our manual synthesis for the
++    // non-SD path, or via the SD's event forwarding) before mUartEnabled is set and
++    // before app_usbd_enable() has had a chance to run. Without this guard the flag
++    // would be consumed and app_usbd_start() would never be called.
++    if (sUsbState.mReadyToStart && nrf_drv_usbd_is_enabled())
+     {
+         sUsbState.mReadyToStart = false;
+-
+-        if (nrf_drv_usbd_is_enabled())
+-        {
+-            app_usbd_start();
+-        }
++        app_usbd_start();
+     }
+ }
+ 
+@@ -260,6 +269,41 @@ static void processTransmit(void)
      }
  }
  
@@ -72,7 +105,18 @@ index 5bcb091..7640a3b 100644
 +        sPrevBaudrate = baudrate;
 +        if (baudrate == 1200)
 +        {
++            // Drop the USB pullup and wait before resetting into the bootloader. This
++            // gives the host's USB controller time to fully process the disconnect
++            // before the bootloader re-asserts the pullup. Without this delay, some
++            // xHCI controllers sporadically fail to re-detect the device promptly.
++            nrf_usbd_pullup_disable();
++            nrf_delay_ms(1000);
++#ifdef SOFTDEVICE_PRESENT
++            sd_power_gpregret_clr(0, 0xFF);
++            sd_power_gpregret_set(0, UF2_BOOTLOADER_GPREGRET_VALUE);
++#else
 +            nrf_power_gpregret_set(UF2_BOOTLOADER_GPREGRET_VALUE);
++#endif
 +            NVIC_SystemReset();
 +        }
 +    }
@@ -82,23 +126,29 @@ index 5bcb091..7640a3b 100644
  void nrf5UartInit(void)
  {
      static const app_usbd_config_t usbdConfig = {
-@@ -286,6 +314,15 @@ void nrf5UartInit(void)
+@@ -286,6 +330,21 @@ void nrf5UartInit(void)
      ret = app_usbd_power_events_enable();
      assert(ret == NRF_SUCCESS);
  
-+#if defined(UF2_BOOTLOADER_ENABLED) && UF2_BOOTLOADER_ENABLED
-+    // Workaround: When transitioning from UF2 bootloader after flashing,
-+    // APP_USBD_EVT_POWER_DETECTED won't fire since VBUS will stay detected during the soft reset.
++#if !defined(SOFTDEVICE_PRESENT)
++    // nrf_drv_power_usbevt_init(), which is called from app_usbd_power_events_enable(),
++    // only synthesizes the DETECTED event in the SoftDevice path. Without the SD, if VBUS
++    // is already present (e.g. after a soft reset from the bootloader), no event fires and
++    // the USBD never gets enabled. Manually trigger the handler to kick-start enumeration.
 +    if (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk)
 +    {
 +        usbdUserEventHandler(APP_USBD_EVT_POWER_DETECTED);
++    }
++    if (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_OUTPUTRDY_Msk)
++    {
++        usbdUserEventHandler(APP_USBD_EVT_POWER_READY);
 +    }
 +#endif
 +
      OT_UNUSED_VARIABLE(ret);
  }
  
-@@ -324,6 +361,10 @@ void nrf5UartProcess(void)
+@@ -324,6 +383,10 @@ void nrf5UartProcess(void)
      processConnection();
      processReceive();
      processTransmit();
@@ -121,3 +171,6 @@ index fa99d44..300e825 100644
      -DENABLE_FEM=1
      -DUSE_APP_CONFIG=1
  )
+-- 
+2.50.1 (Apple Git-155)
+

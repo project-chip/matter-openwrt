@@ -18,13 +18,12 @@ PKG_NAME:=openthread-rcp-nrf528xx
 PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/openthread/ot-nrf528xx.git
 PKG_SOURCE_PROTO:=git-with-metadata
-PKG_SOURCE_MIRROR:=0 # don't try OpenWrt mirror
 
 # Note: The commit picked for this package should be aligned with that of the
 # openthread-br package so that the underlying OpenThread version matches.
-PKG_SOURCE_DATE:=2025-10-28
-PKG_SOURCE_VERSION:=580f7bc7b432ee98c0767fbca13563c18f0144e0
-PKG_MIRROR_HASH:=2f1e8283a7de7191851041106cec87e832f314d7f486e193c6b013bcdcdbe8fb
+PKG_SOURCE_DATE:=2026-05-22
+PKG_SOURCE_VERSION:=486c0e6c1c3fd657d1715e2d0ef9cac1ee2b8073
+PKG_MIRROR_HASH:=119d84cc60634a672ae662722c787a4ca5276fdf692606c12a05cf6dec5bd6b6
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE
