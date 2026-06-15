@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2024 Project CHIP Authors
+# Copyright (c) 2023-2026 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,9 +25,9 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2025-10-29
-PKG_SOURCE_VERSION:=8f221d80d3f78d63ff4ad3d2d363e702430b5df7
-PKG_MIRROR_HASH:=eb565be9381ce88369b063d5ba25855218b657e366b3258c74e4cc41956c08b2
+PKG_SOURCE_DATE:=2026-06-13
+PKG_SOURCE_VERSION:=b39eff6ed09e92344c3c6cc9a5a1b495a469bbfd
+PKG_MIRROR_HASH:=cc87d6df5cc945309bea4c810ba90081fa59dfaaa1daedf9fa199d17e3f313f8
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
