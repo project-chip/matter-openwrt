@@ -57,7 +57,7 @@ define Package/openthread-br/Default
   CATEGORY:=Network
   TITLE:=OpenThread Border Router
   URL:=https://github.com/openthread/ot-br-posix
-  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libubox +kmod-usb-acm +kmod-tun
+  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libubox +kmod-usb-acm +kmod-tun +jsonfilter
 endef
 
 define Package/openthread-br/Default/description

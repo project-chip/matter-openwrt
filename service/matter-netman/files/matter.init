@@ -23,7 +23,7 @@ start_service() {
 	. /usr/share/matter/bootstrap.sh
 
 	procd_open_instance
-	procd_set_param command "$PROG"
+	procd_set_param command /bin/sh -c 'umask 027; exec "$@"' - "$PROG"
 	procd_set_param user matter
 	procd_set_param group matter
 	procd_set_param respawn
