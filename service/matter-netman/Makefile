@@ -15,7 +15,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=matter-netman
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_SOURCE_URL:=https://github.com/project-chip/connectedhomeip.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_SUBMODULES:=\
@@ -49,7 +49,7 @@ define Package/matter-netman/default
   CATEGORY:=Network
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
-  DEPENDS:=+libstdcpp +libatomic +libubus +libubox
+  DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter
   USERID:=matter:matter
 endef
 
@@ -112,10 +112,10 @@ endif
 # Configuration / persistence
 CONF_DIR:=/etc/matter
 TARGET_CFLAGS+=\
-	-DCHIP_CONFIG_KVS_PATH=\"$(CONF_DIR)/chip_kvs.ini\" \
 	-DFATCONFDIR=\"$(CONF_DIR)\" \
-	-DSYSCONFDIR=\"$(CONF_DIR)\" \
-	-DLOCALSTATEDIR=\"$(CONF_DIR)\"
+	-DSYSCONFDIR=\"$(CONF_DIR)/data\" \
+	-DLOCALSTATEDIR=\"$(CONF_DIR)/data\" \
+	-DCHIP_CONFIG_KVS_PATH=\"$(CONF_DIR)/data/chip_kvs.ini\"
 
 # Device Information. Runtime information is configured by bootstrap.sh
 include $(INCLUDE_DIR)/version.mk

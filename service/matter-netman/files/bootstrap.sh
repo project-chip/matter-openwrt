@@ -13,7 +13,6 @@
 # limitations under the License.
 
 type get_mac_label >/dev/null || . /lib/functions/system.sh
-type json_init >/dev/null || . /usr/share/libubox/jshn.sh
 
 random_uint32() {
 	hexdump -n 4 -e '4 "%u"' /dev/urandom
@@ -35,17 +34,7 @@ random_pincode() {
 }
 
 get_model_name() {
-	local model
-	local cfg="/etc/board.json"
-	[ -s "$cfg" ] || return
-	json_init
-	json_load "$(cat $cfg)"
-	if json_is_a model object; then
-		json_select model
-		json_get_var model name
-		json_select ..
-	fi
-	echo "$model"
+	jsonfilter -q -i /etc/board.json -e @.model.name
 }
 
 generate_factory_ini() {
@@ -62,13 +51,36 @@ generate_factory_ini() {
 }
 
 matter_bootstrap() {
-	mkdir -p /etc/matter
-	chown matter:matter /etc/matter
-	chmod 0700 /etc/matter
+	# create /etc/matter and /etc/matter/data if needed
+	if ! [ -d /etc/matter/data ]; then
+		if ! [ -d /etc/matter ]; then
+			mkdir -m 0750 /etc/matter
+			chgrp matter /etc/matter
+		fi
+		mkdir -m 0700 /etc/matter/data
+		chown matter:matter /etc/matter/data
+	fi
+
+	# generate factory config if necessary
 	local ini=/etc/matter/chip_factory.ini
 	if ! [ -s "$ini" ]; then
-		generate_factory_ini >"${ini}.tmp"
+		rm -f "${ini}.tmp"
+		( umask 277; generate_factory_ini >"${ini}.tmp" )
+		chown matter:matter "${ini}.tmp"
 		mv "${ini}.tmp" "$ini"
+	fi
+
+	# migration: /etc/matter used to be owned by matter
+	if ! [ -O /etc/matter ]; then
+		chmod 0400 /etc/matter/chip_factory.ini
+		chown matter:matter /etc/matter/chip_factory.ini
+		chmod 0750 /etc/matter
+		chown root:matter /etc/matter
+	fi
+
+	# migration: data used to live in /etc/matter directly
+	if [ -f /etc/matter/chip_kvs.ini -a ! -f /etc/matter/data/chip_kvs.ini ]; then
+		mv -n /etc/matter/chip_config.ini /etc/matter/chip_counters.ini /etc/matter/chip_kvs.ini /etc/matter/data/
 	fi
 }
 
