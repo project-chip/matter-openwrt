@@ -49,7 +49,7 @@ define Package/matter-netman/default
   CATEGORY:=Network
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
-  DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter
+  DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter +rpcd
   USERID:=matter:matter
 endef
 
@@ -149,11 +149,12 @@ define Build/Compile
 endef
 
 define Package/matter-netman/default/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d $(1)/etc/config
 	$(INSTALL_BIN) $(OUT_DIR)/matter-network-manager-app $(1)/usr/sbin
 	$(INSTALL_DATA) ./files/bootstrap.sh $(1)/usr/share/matter/
 	$(INSTALL_DATA) ./files/matter_acl.json $(1)/usr/share/acl.d
 	$(INSTALL_BIN) ./files/matter.init $(1)/etc/init.d/matter
+	$(INSTALL_DATA) ./files/matter_uci.defaults $(1)/etc/config/matter
 endef
 
 Package/matter-netman-mbedtls/install=$(Package/matter-netman/default/install)

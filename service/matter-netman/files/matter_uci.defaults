@@ -1,0 +1,4 @@
+
+config struct 'values'
+        option wifi_iface 'default_radio0'
+
