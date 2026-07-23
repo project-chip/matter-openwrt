@@ -1,0 +1,122 @@
+From beec41ab1115a797d541ac36bfd1f7d07a1e4d9e Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 22 Mar 2023 10:58:42 +1300
+Subject: [PATCH] wpa_supplicant: Add per-network openssl_ecdh_curves option
+
+Add an openssl_ecdh_curves network-block configuration option to wpa_supplicant
+(hostapd already has this option). The value is passed through eap_peer_config
+into tls_connection_params and applied per connection via
+tls_connection_set_params(), which both the OpenSSL and wolfSSL backends
+already support.
+
+Note that (unlike openssl_ciphers) this option is per-network only, with no
+corresponding global option. Adding a global option would require either adding
+the corresponding field to the tls_config struct accepted by tls_init() and
+adapting all relevant backends to handle that field, or changing the supplicant
+to call tls_global_set_params() after tls_init().
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/eap_peer/eap_config.h          | 8 ++++++++
+ src/eap_peer/eap_tls_common.c      | 1 +
+ wpa_supplicant/config.c            | 2 ++
+ wpa_supplicant/config_file.c       | 1 +
+ wpa_supplicant/wpa_cli.c           | 2 +-
+ wpa_supplicant/wpa_supplicant.conf | 5 +++++
+ 6 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/src/eap_peer/eap_config.h b/src/eap_peer/eap_config.h
+index 4e06e413c..5132d08fc 100644
+--- a/src/eap_peer/eap_config.h
++++ b/src/eap_peer/eap_config.h
+@@ -694,6 +694,14 @@ struct eap_peer_config {
+ 	 */
+ 	char *openssl_ciphers;
+ 
++	/**
++	 * openssl_ecdh_curves - OpenSSL ECDH curves / groups string
++	 *
++	 * Configures the ECDH curves / groups for this connection.
++	 * Not all TLS backends support this option.
++	 */
++	char *openssl_ecdh_curves;
++
+ 	/**
+ 	 * erp - Whether EAP Re-authentication Protocol (ERP) is enabled
+ 	 */
+diff --git a/src/eap_peer/eap_tls_common.c b/src/eap_peer/eap_tls_common.c
+index 9b40b3a85..76e15b8d2 100644
+--- a/src/eap_peer/eap_tls_common.c
++++ b/src/eap_peer/eap_tls_common.c
+@@ -232,6 +232,7 @@ static int eap_tls_params_from_conf(struct eap_sm *sm,
+ 	}
+ 
+ 	params->openssl_ciphers = config->openssl_ciphers;
++	params->openssl_ecdh_curves = config->openssl_ecdh_curves;
+ 
+ 	sm->ext_cert_check = !!(params->flags & TLS_CONN_EXT_CERT_CHECK);
+ 
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index 4e49dd9a7..f23b16e1b 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -2709,6 +2709,7 @@ static const struct parse_data ssid_fields[] = {
+ 	{ STRe(imsi_privacy_cert, imsi_privacy_cert) },
+ 	{ STRe(imsi_privacy_attr, imsi_privacy_attr) },
+ 	{ STRe(openssl_ciphers, openssl_ciphers) },
++	{ STRe(openssl_ecdh_curves, openssl_ecdh_curves) },
+ 	{ INTe(erp, erp) },
+ #endif /* IEEE8021X_EAPOL */
+ #ifdef CONFIG_WEP
+@@ -3009,6 +3010,7 @@ static void eap_peer_config_free(struct eap_peer_config *eap)
+ 	bin_clear_free(eap->new_password, eap->new_password_len);
+ 	str_clear_free(eap->external_sim_resp);
+ 	os_free(eap->openssl_ciphers);
++	os_free(eap->openssl_ecdh_curves);
+ }
+ 
+ #endif /* IEEE8021X_EAPOL */
+diff --git a/wpa_supplicant/config_file.c b/wpa_supplicant/config_file.c
+index 9baf5739c..3eb6addfc 100644
+--- a/wpa_supplicant/config_file.c
++++ b/wpa_supplicant/config_file.c
+@@ -850,6 +850,7 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
+ 	INTe(machine_engine, machine_cert.engine);
+ 	INT_DEF(eapol_flags, DEFAULT_EAPOL_FLAGS);
+ 	STR(openssl_ciphers);
++	STR(openssl_ecdh_curves);
+ 	INTe(erp, erp);
+ #endif /* IEEE8021X_EAPOL */
+ #ifdef CONFIG_WEP
+diff --git a/wpa_supplicant/wpa_cli.c b/wpa_supplicant/wpa_cli.c
+index 9bf96c442..dc49c60b2 100644
+--- a/wpa_supplicant/wpa_cli.c
++++ b/wpa_supplicant/wpa_cli.c
+@@ -1466,7 +1466,7 @@ static const char *network_fields[] = {
+ 	"pcsc", "pin", "engine_id", "key_id", "cert_id", "ca_cert_id",
+ 	"pin2", "engine2_id", "key2_id", "cert2_id", "ca_cert2_id",
+ 	"engine", "engine2", "eapol_flags", "sim_num",
+-	"openssl_ciphers", "erp",
++	"openssl_ciphers", "openssl_ecdh_curves", "erp",
+ #endif /* IEEE8021X_EAPOL */
+ 	"wep_key0", "wep_key1", "wep_key2", "wep_key3",
+ 	"wep_tx_keyidx", "priority",
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index f7852293b..078870add 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -1571,6 +1571,11 @@ fast_reauth=1
+ #	This can be used to override the global openssl_ciphers configuration
+ #	parameter (see above).
+ #
++# openssl_ecdh_curves: OpenSSL specific ECDH curve (group) configuration
++#	Colon separated list of the allowed ECDH curves / groups, e.g.,
++#	"P-521:P-384:P-256". This is configured per network only (there is no
++#	global counterpart) and not all TLS backends support this option.
++#
+ # erp: Whether EAP Re-authentication Protocol (ERP) is enabled
+ #
+ # EAP-FAST variables:
+-- 
+2.50.1 (Apple Git-155)
+

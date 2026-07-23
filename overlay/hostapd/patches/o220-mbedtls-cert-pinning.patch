@@ -1,0 +1,123 @@
+From 917eb5e7667ffa41cb5d40135e1e31fddf7efb4f Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 23 Jul 2026 01:10:57 +1200
+Subject: [PATCH] mbedtls: Add backend support for EAP-TLS client cert pinning
+
+Implement tls_connection_get_peer_cert() and TLS_CONN_DISABLE_CHAIN_VALIDATION
+for the MbedTLS backend; with these changes eap_tls_cert_pinning works and
+passes hwsim tests.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/tls_mbedtls.c | 51 ++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
+index fcd8cbc65..6796181be 100644
+--- a/src/crypto/tls_mbedtls.c
++++ b/src/crypto/tls_mbedtls.c
+@@ -186,8 +186,10 @@ struct tls_connection {
+ 
+ 	unsigned int established:1;
+ 	unsigned int resumed:1;
+-	unsigned int verify_peer:1;
++	unsigned int verify_peer:2; /* 0/1/2 as passed to tls_connection_set_verify() */
++	unsigned int peer_cert:1;
+ 	unsigned int is_server:1;
++	unsigned int disable_chain_validation:1;
+ 
+ 	mbedtls_ssl_context ssl;
+ 
+@@ -2003,17 +2005,31 @@ int tls_connection_set_verify(void *tls_ctx, struct tls_connection *conn,
+ 	if (conn == NULL)
+ 		return -1;
+ 
+-	conn->tls_conf->flags |= flags;/* TODO: reprocess flags, if necessary */
++	/* TLS_CONN_DISABLE_CHAIN_VALIDATION must be stored per-connection: the
++	 * server-side conn->tls_conf is the shared global singleton (see
++	 * tls_connection_init()), so ORing it into tls_conf->flags would leak
++	 * the relaxation to every other connection/BSS. */
++	conn->disable_chain_validation =
++		!!(flags & TLS_CONN_DISABLE_CHAIN_VALIDATION);
++	conn->tls_conf->flags |= (flags & ~TLS_CONN_DISABLE_CHAIN_VALIDATION);
++	/* TODO: reprocess flags, if necessary */
+ 
+ 	int authmode;
+-	switch (verify_peer) {
++	switch ((conn->verify_peer = verify_peer)) {
+ 	case 2:  authmode = MBEDTLS_SSL_VERIFY_OPTIONAL; break;/*(eap_teap_init())*/
+ 	case 1:  authmode = MBEDTLS_SSL_VERIFY_REQUIRED; break;
+ 	default: authmode = MBEDTLS_SSL_VERIFY_NONE;     break;
+ 	}
++	/* Configuring a CA is optional with TLS_CONN_DISABLE_CHAIN_VALIDATION,
++	 * but MbedTLS fails with MBEDTLS_ERR_SSL_NO_CA_CHAIN when VERIFY_REQUIRED
++	 * is used without one. Relax to VERIFY_OPTIONAL and enforce that a cert
++	 * was presented after the handshake in tls_connection_handshake(). */
++	if (conn->disable_chain_validation && authmode == MBEDTLS_SSL_VERIFY_REQUIRED &&
++	    !conn->tls_conf->has_ca_cert)
++		authmode = MBEDTLS_SSL_VERIFY_OPTIONAL;
+ 	mbedtls_ssl_set_hs_authmode(&conn->ssl, authmode);
+ 
+-	if ((conn->verify_peer = (authmode != MBEDTLS_SSL_VERIFY_NONE)))
++	if (authmode != MBEDTLS_SSL_VERIFY_NONE)
+ 		mbedtls_ssl_set_verify(&conn->ssl, tls_mbedtls_verify_cb, conn);
+ 	else
+ 		mbedtls_ssl_set_verify(&conn->ssl, NULL, NULL);
+@@ -2347,6 +2363,15 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
+ 				}
+ 			}
+ 		}
++
++		/* Ensure the peer presented a certificate if verify_peer == 1,
++		 * since we may have relaxed authmode to VERIFY_OPTIONAL to support
++		 * TLS_CONN_DISABLE_CHAIN_VALIDATION with no CA certificate. */
++		if (!conn->failed && conn->verify_peer == 1 && !conn->peer_cert) {
++			emsg(MSG_INFO, "verify_peer = 1 but peer presented no certificate");
++			conn->established = 0;
++			++conn->failed;
++		}
+ 		break;
+ 	case MBEDTLS_ERR_SSL_WANT_WRITE:
+ 	case MBEDTLS_ERR_SSL_WANT_READ:
+@@ -2692,6 +2717,17 @@ const char * tls_connection_get_peer_subject(struct tls_connection *conn)
+ #endif
+ 
+ 
++struct wpabuf * tls_connection_get_peer_cert(struct tls_connection *conn)
++{
++	if (!conn)
++		return NULL;
++	const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&conn->ssl);
++	if (!crt)
++		return NULL;
++	return wpabuf_alloc_copy(crt->raw.p, crt->raw.len);
++}
++
++
+ #ifdef TLS_MBEDTLS_EAP_TEAP
+ bool tls_connection_get_own_cert_used(struct tls_connection *conn)
+ {
+@@ -3178,6 +3214,8 @@ tls_mbedtls_verify_cb (void *arg, mbedtls_x509_crt *crt, int depth, uint32_t *fl
+ 	struct tls_conf *tls_conf = conn->tls_conf;
+ 	uint32_t flags_in = *flags;
+ 
++	conn->peer_cert = 1;
++
+ 	if (depth > 8) { /*(depth 8 picked as arbitrary limit)*/
+ 		emsg(MSG_WARNING, "client cert chain too long");
+ 		*flags |= MBEDTLS_X509_BADCERT_OTHER; /* cert chain too long */
+@@ -3204,6 +3242,11 @@ tls_mbedtls_verify_cb (void *arg, mbedtls_x509_crt *crt, int depth, uint32_t *fl
+ 		  #endif
+ 		}
+ 	}
++	else if (conn->disable_chain_validation) {
++		if (depth == 0 && !conn->peer_subject)
++			tls_mbedtls_set_peer_subject(conn, crt);
++		*flags = 0;
++	}
+ 	else if (depth == 0) {
+ 		if (!conn->peer_subject)
+ 			tls_mbedtls_set_peer_subject(conn, crt);
+-- 
+2.50.1 (Apple Git-155)
+

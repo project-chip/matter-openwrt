@@ -1,0 +1,127 @@
+From 7616ee47ee45ab2de72de2d502f28db0e056db9a Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Sat, 27 Jun 2026 22:20:38 +1200
+Subject: [PATCH] mbedtls: Improve tls_flags handling and avoid mutating shared
+ conf
+
+tls_mbedtls_set_allowed_tls_vers() previously mutated the flags in the
+passed-in tls_conf struct, e.g. when TLS_CONN_SUITEB was set, even though it
+can point to the shared global configuration.
+
+Also make it return int rather than void (utilizing the usual 0 = success
+convention) and treat configurations that explicitly request unsupported
+options a hard error instead of silently ignoring such flags. This covers:
+- ENABLE-TLSv1.0/1.1 on mbedtls 3.x (which no longer supports those versions)
+- Configurations where no TLS version is enabled (e.g. DISABLE-TLSv1.2 without
+  ENABLE-TLSv1.3).
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/tls_mbedtls.c | 52 +++++++++++++++++++++++-----------------
+ 1 file changed, 30 insertions(+), 22 deletions(-)
+
+diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
+index 65beeee3f..fcd8cbc65 100644
+--- a/src/crypto/tls_mbedtls.c
++++ b/src/crypto/tls_mbedtls.c
+@@ -641,21 +641,21 @@ static int tls_mbedtls_data_is_pem(const u8 *data)
+ }
+ 
+ 
+-static void tls_mbedtls_set_allowed_tls_vers(struct tls_conf *tls_conf,
+-                                             mbedtls_ssl_config *conf)
++static int tls_mbedtls_set_allowed_tls_vers(const struct tls_conf *tls_conf,
++                                            mbedtls_ssl_config *conf)
+ {
++	unsigned int flags = tls_conf->flags;
++
+   #if !defined(MBEDTLS_SSL_PROTO_TLS1_3)
+-	tls_conf->flags |= TLS_CONN_DISABLE_TLSv1_3;
++	flags |= TLS_CONN_DISABLE_TLSv1_3;
+   #endif
+ 
+ 	/* unconditionally require TLSv1.2+ for TLS_CONN_SUITEB */
+-	if (tls_conf->flags & TLS_CONN_SUITEB) {
+-		tls_conf->flags |= TLS_CONN_DISABLE_TLSv1_0;
+-		tls_conf->flags |= TLS_CONN_DISABLE_TLSv1_1;
++	if (flags & TLS_CONN_SUITEB) {
++		flags |= TLS_CONN_DISABLE_TLSv1_0;
++		flags |= TLS_CONN_DISABLE_TLSv1_1;
+ 	}
+ 
+-	const unsigned int flags = tls_conf->flags;
+-
+ 	/* attempt to map flags to min and max TLS protocol version */
+ 
+ 	int min = (flags & TLS_CONN_DISABLE_TLSv1_0)
+@@ -681,19 +681,28 @@ static void tls_mbedtls_set_allowed_tls_vers(struct tls_conf *tls_conf,
+ 	if ((flags & TLS_CONN_ENABLE_TLSv1_2) && min > 2) min = 2;
+ 	if ((flags & TLS_CONN_ENABLE_TLSv1_1) && min > 1) min = 1;
+ 	if ((flags & TLS_CONN_ENABLE_TLSv1_0) && min > 0) min = 0;
+-	if (max < min) {
+-		emsg(MSG_ERROR, "invalid tls_disable_tlsv* params; ignoring");
+-		return;
+-	}
++
+   #if MBEDTLS_VERSION_NUMBER >= 0x03000000 /* mbedtls 3.0.0 */
+-	/* mbed TLS 3.0.0 removes support for protocols < TLSv1.2 */
+-	if (min < 2 || max < 2) {
+-		emsg(MSG_ERROR, "invalid tls_disable_tlsv* params; ignoring");
+-		if (min < 2) min = 2;
+-		if (max < 2) max = 2;
++	/* mbed TLS 3.0.0 removes support for protocols < TLS 1.2 */
++	if (min < 2) {
++		if (flags & TLS_CONN_ENABLE_TLSv1_0) {
++			emsg(MSG_ERROR, "TLSv1.0 explicitly enabled but unsupported");
++			return -1;
++		}
++		if (flags & TLS_CONN_ENABLE_TLSv1_1) {
++			emsg(MSG_ERROR, "TLSv1.1 explicitly enabled but unsupported");
++			return -1;
++		}
++		min = 2;
+ 	}
+   #endif
+ 
++	if (max < min) {
++		emsg(MSG_ERROR, "All supported TLS protocol versions disabled");
++		return -1;
++	}
++	wpa_printf(MSG_DEBUG, "MTLS: configuring version range: TLSv1.%d - TLSv1.%d", min, max);
++
+   #if MBEDTLS_VERSION_NUMBER >= 0x03020000 /* mbedtls 3.2.0 */
+ 	/* MBEDTLS_SSL_VERSION_TLS1_2 = 0x0303 *//*!< (D)TLS 1.2 */
+ 	/* MBEDTLS_SSL_VERSION_TLS1_3 = 0x0304 *//*!< (D)TLS 1.3 */
+@@ -702,10 +711,6 @@ static void tls_mbedtls_set_allowed_tls_vers(struct tls_conf *tls_conf,
+ 	mbedtls_ssl_conf_min_tls_version(conf, min);
+ 	mbedtls_ssl_conf_max_tls_version(conf, max);
+   #else
+-   #ifndef MBEDTLS_SSL_MINOR_VERSION_4
+-	if (min == 3) min = 2;
+-	if (max == 3) max = 2;
+-   #endif
+ 	/* MBEDTLS_SSL_MINOR_VERSION_0  0 *//*!< SSL v3.0 */
+ 	/* MBEDTLS_SSL_MINOR_VERSION_1  1 *//*!< TLS v1.0 */
+ 	/* MBEDTLS_SSL_MINOR_VERSION_2  2 *//*!< TLS v1.1 */
+@@ -714,6 +719,8 @@ static void tls_mbedtls_set_allowed_tls_vers(struct tls_conf *tls_conf,
+ 	mbedtls_ssl_conf_min_version(conf, MBEDTLS_SSL_MAJOR_VERSION_3, min+1);
+ 	mbedtls_ssl_conf_max_version(conf, MBEDTLS_SSL_MAJOR_VERSION_3, max+1);
+   #endif
++
++	return 0;
+ }
+ 
+ 
+@@ -1773,7 +1780,8 @@ static int tls_mbedtls_set_params(struct tls_conf *tls_conf,
+ 		mbedtls_ssl_conf_dhm_min_bitlen(&tls_conf->conf, 3072);
+ 	}
+ 
+-	tls_mbedtls_set_allowed_tls_vers(tls_conf, &tls_conf->conf);
++	if (tls_mbedtls_set_allowed_tls_vers(tls_conf, &tls_conf->conf) != 0)
++		return -1;
+ 	ret = tls_mbedtls_set_certs(tls_conf, params);
+ 	if (ret != 0)
+ 		return -1;
+-- 
+2.50.1 (Apple Git-155)
+

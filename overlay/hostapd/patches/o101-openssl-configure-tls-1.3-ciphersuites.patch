@@ -1,0 +1,215 @@
+From dc86613cfee5fe0b1ebb16b9e69a173b0be8fb80 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Tue, 21 Mar 2023 23:15:53 +1300
+Subject: [PATCH] OpenSSL: Configure TLS 1.3 ciphersuites from openssl_ciphers
+
+OpenSSL introduced a separate API for configuration of TLS 1.3 cipher suites,
+distinct from the list of TLS <=1.2 ciphers. Other implementations (e.g.
+wolfSSL, BoringSSL, and MbedTLS) accept both generations in their existing
+cipher list APIs. This change adds support for configuring TLS 1.3 suites in
+OpenSSL from a similar combined list.
+
+This is done by separating the combined list into TLS 1.3 suites (they all
+start with "TLS_"), and legacy (pre-1.3) ciphers.  If the list contains no
+legacy ciphers then that list is explicitly cleared, effectively resulting in a
+1.3-only configuration. If the list contains no TLS 1.3 suites, the default
+suites are left unchanged. This preserves the current behavior of letting such
+configurations limit the list of accepted legacy ciphers without disabling TLS
+1.3 as an unintended side effect.
+
+Note that wolfSSL has similar logic driven by its combined cipher list API
+internally. BoringSSL implements a more opinionated version of the same policy
+by recognizing 1.3 suite names in the cipher list, but simply keeps all the 1.3
+suites it supports enabled at all times.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/tls_openssl.c | 123 ++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 116 insertions(+), 7 deletions(-)
+
+diff --git a/src/crypto/tls_openssl.c b/src/crypto/tls_openssl.c
+index eab43df39..13016964a 100644
+--- a/src/crypto/tls_openssl.c
++++ b/src/crypto/tls_openssl.c
+@@ -123,6 +123,115 @@ static size_t SSL_SESSION_get_master_key(const SSL_SESSION *session,
+ 
+ #endif
+ 
++
++#if (OPENSSL_VERSION_NUMBER >= 0x10101000L) && !defined(OPENSSL_IS_BORINGSSL)
++/*
++ * OpenSSL has introduced a separated API for TLS 1.3 cipher suites distinct
++ * from the API that configures ciphers for TLS versions <=1.2, whereas other
++ * implementations (e.g. wolfSSL) kept a single API.
++ *
++ * Provide a shim that separates a combined list into TLS 1.3 cipher suites
++ * (they all start with "TLS_"), and pre-1.3 ciphers. If the list contains no
++ * TLS 1.3 cipher suites, the existing suites are left untouched (matching
++ * current / desired behavior), but if there are no pre-1.3 ciphers that list
++ * is explicitly cleared. This allows for TLS 1.3-only configurations.
++ */
++static int _set_cipher_list_and_suites(void *ssl, char const *combined,
++				       int (*set_cipher_list)(void *, char const *),
++				       int (*set_ciphersuites)(void *, char const *))
++{
++	int success = 1;
++	char *ciphers = NULL, *ciphers_end;
++	char *suites = NULL, *suites_end;
++	int len = os_strlen(combined);
++	char const *combined_end = combined + len;
++
++	ciphers = os_malloc(len + 1);
++	suites = os_malloc(len + 1);
++	if (!ciphers || !suites) {
++		success = 0;
++		goto done;
++	}
++
++	ciphers_end = ciphers;
++	suites_end = suites;
++	while (combined < combined_end) {
++		char const *sep = os_strchr(combined, ':');
++		len = (sep ? sep : combined_end) - combined;
++		if (os_strncmp(combined, "TLS_", 4) == 0) {
++			os_memcpy(suites_end, combined, len);
++			suites_end += len;
++			*suites_end++ = ':';
++		} else {
++			os_memcpy(ciphers_end, combined, len);
++			ciphers_end += len;
++			*ciphers_end++ = ':';
++		}
++		combined += len + 1;
++	}
++
++	if (ciphers_end > ciphers) {
++		*--ciphers_end = '\0';
++		wpa_printf(MSG_DEBUG,
++			   "OpenSSL: setting cipher_list '%s'",
++			   ciphers);
++		success = set_cipher_list(ssl, ciphers);
++	} else {
++		wpa_printf(MSG_DEBUG, "OpenSSL: clearing cipher_list");
++		if (!set_cipher_list(ssl, "")) {
++			/* Passing an empty string clears the pre-1.3 cipher
++			 * list as intended, but SSL[_CTX]_set_cipher_list()
++			 * reports the fact that no cipher was selected as
++			 * SSL_R_NO_CIPHER_MATCH. Treat this specific error as
++			 * a success. */
++			unsigned long err = ERR_peek_error();
++			if (ERR_GET_LIB(err) == ERR_LIB_SSL &&
++			    ERR_GET_REASON(err) == SSL_R_NO_CIPHER_MATCH) {
++				(void) ERR_get_error(); /* consume the error */
++			} else {
++				success = 0;
++				goto done;
++			}
++		}
++	}
++
++	if (success && suites_end > suites) {
++		*--suites_end = '\0';
++		wpa_printf(MSG_DEBUG,
++			   "OpenSSL: setting ciphersuites '%s'",
++			   suites);
++		success = set_ciphersuites(ssl, suites);
++	}
++
++done:
++	os_free(ciphers);
++	os_free(suites);
++	return success;
++}
++
++static inline int SSL_CTX_set_cipher_list_and_ciphersuites(SSL_CTX *ctx,
++							   const char *combined)
++{
++	return _set_cipher_list_and_suites(ctx, combined,
++					   (int (*)(void *, char const *))SSL_CTX_set_cipher_list,
++					   (int (*)(void *, char const *))SSL_CTX_set_ciphersuites);
++}
++
++static inline int SSL_set_cipher_list_and_ciphersuites(SSL *ssl,
++						       const char *combined)
++{
++	return _set_cipher_list_and_suites(ssl, combined,
++					   (int (*)(void *, char const *))SSL_set_cipher_list,
++					   (int (*)(void *, char const *))SSL_set_ciphersuites);
++}
++#else /* >= 1.1.1 and !OPENSSL_IS_BORINGSSL */
++#define SSL_CTX_set_cipher_list_and_ciphersuites(ctx, ciphers) \
++	SSL_CTX_set_cipher_list(ctx, ciphers)
++#define SSL_set_cipher_list_and_ciphersuites(ssl, ciphers) \
++	SSL_set_cipher_list(ssl, ciphers)
++#endif /* >= 1.1.1 and !OPENSSL_IS_BORINGSSL */
++
++
+ #if OPENSSL_VERSION_NUMBER < 0x10100000L
+ static const unsigned char * ASN1_STRING_get0_data(const ASN1_STRING *x)
+ {
+@@ -1322,7 +1431,7 @@ void * tls_init(const struct tls_config *conf)
+ 		ciphers = conf->openssl_ciphers;
+ 	else
+ 		ciphers = TLS_DEFAULT_CIPHERS;
+-	if (SSL_CTX_set_cipher_list(ssl, ciphers) != 1) {
++	if (SSL_CTX_set_cipher_list_and_ciphersuites(ssl, ciphers) != 1) {
+ 		wpa_printf(MSG_ERROR,
+ 			   "OpenSSL: Failed to set cipher string '%s'",
+ 			   ciphers);
+@@ -3374,7 +3483,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+ 				   openssl_ciphers);
+ 			ciphers = openssl_ciphers;
+ 		}
+-		if (SSL_set_cipher_list(ssl, ciphers) != 1) {
++		if (SSL_set_cipher_list_and_ciphersuites(ssl, ciphers) != 1) {
+ 			wpa_printf(MSG_INFO,
+ 				   "OpenSSL: Failed to set Suite B ciphers");
+ 			return -1;
+@@ -3393,7 +3502,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+ 				   openssl_ciphers);
+ 			ciphers = openssl_ciphers;
+ 		}
+-		if (SSL_set_cipher_list(ssl, ciphers) != 1) {
++		if (SSL_set_cipher_list_and_ciphersuites(ssl, ciphers) != 1) {
+ 			wpa_printf(MSG_INFO,
+ 				   "OpenSSL: Failed to set Suite B ciphers");
+ 			return -1;
+@@ -3481,7 +3590,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+ 	}
+ #else /* OPENSSL_IS_BORINGSSL */
+ 	if (!(flags & (TLS_CONN_SUITEB | TLS_CONN_SUITEB_NO_ECDH)) &&
+-	    openssl_ciphers && SSL_set_cipher_list(ssl, openssl_ciphers) != 1) {
++	    openssl_ciphers && SSL_set_cipher_list_and_ciphersuites(ssl, openssl_ciphers) != 1) {
+ 		wpa_printf(MSG_INFO,
+ 			   "OpenSSL: Failed to set openssl_ciphers '%s'",
+ 			   openssl_ciphers);
+@@ -3489,7 +3598,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+ 	}
+ #endif /* OPENSSL_IS_BORINGSSL */
+ #else /* CONFIG_SUITEB */
+-	if (openssl_ciphers && SSL_set_cipher_list(ssl, openssl_ciphers) != 1) {
++	if (openssl_ciphers && SSL_set_cipher_list_and_ciphersuites(ssl, openssl_ciphers) != 1) {
+ 		wpa_printf(MSG_INFO,
+ 			   "OpenSSL: Failed to set openssl_ciphers '%s'",
+ 			   openssl_ciphers);
+@@ -5658,7 +5767,7 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
+ 	}
+ #endif /* OPENSSL_IS_BORINGSSL */
+ #endif /* CONFIG_SUITEB */
+-	if (ciphers && SSL_set_cipher_list(conn->ssl, ciphers) != 1) {
++	if (ciphers && SSL_set_cipher_list_and_ciphersuites(conn->ssl, ciphers) != 1) {
+ 		wpa_printf(MSG_INFO,
+ 			   "OpenSSL: Failed to set cipher string '%s'",
+ 			   ciphers);
+@@ -5885,7 +5994,7 @@ int tls_global_set_params(void *tls_ctx,
+ 		data->openssl_ciphers = NULL;
+ 	}
+ 	if (params->openssl_ciphers &&
+-	    SSL_CTX_set_cipher_list(ssl_ctx, params->openssl_ciphers) != 1) {
++	    SSL_CTX_set_cipher_list_and_ciphersuites(ssl_ctx, params->openssl_ciphers) != 1) {
+ 		wpa_printf(MSG_INFO,
+ 			   "OpenSSL: Failed to set cipher string '%s'",
+ 			   params->openssl_ciphers);
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,96 @@
+From 14e87f4f3508324110e5ec0c1626ee6527bd7b25 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Fri, 26 Jun 2026 23:14:41 +1200
+Subject: [PATCH] mbedtls: TLS 1.3 key export and application data processing
+
+Use mbedtls_ssl_export_keying_material() instead of mbedtls_ssl_tls_prf() in
+tls_connection_export_key() when MBEDTLS_SSL_KEYING_MATERIAL_EXPORT is enabled.
+It correctly implements both the TLS <=1.2 (PRF-based) and TLS 1.3 export. This
+mirrors the OpenSSL backend's use of SSL_export_keying_material(). Without this
+change, hostapd is unable to derive the MSK after a successful EAP TLS 1.3
+handshake and disassociates the station.
+
+The mbedtls_ssl_export_keys_cb() code paths are kept as they are still used by
+tls_connection_get_random() and the EAP-FAST (TLS 1.2 only) key derivation.
+
+Also decrypt and pass through post-handshake application data. This is
+necessary so the "protected success indication" can be processed on the
+supplicant side, allowing the EAP-TLS 1.3 handshake to complete successfully.
+
+With these changes, EAP-TLS 1.3 hwsim tests pass on mbedtls.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/tls_mbedtls.c   | 33 ++++++++++++++++++++++++++++++---
+ tests/hwsim/test_ap_eap.py |  4 +---
+ 2 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
+index 69aa032a8..6c766bcf2 100644
+--- a/src/crypto/tls_mbedtls.c
++++ b/src/crypto/tls_mbedtls.c
+@@ -2053,7 +2053,16 @@ int tls_connection_export_key(void *tls_ctx, struct tls_connection *conn,
+ 			      size_t context_len, u8 *out, size_t out_len)
+ {
+ 	/* (EAP-PEAP EAP-TLS EAP-TTLS) */
+-  #if MBEDTLS_VERSION_NUMBER >= 0x02120000 /* mbedtls 2.18.0 */
++  #if defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT) /* mbedtls 3.6.4 */
++	/* Implements both TLS <= 1.2 and TLS 1.3 keying material export */
++	return (conn && conn->established)
++	  ? mbedtls_ssl_export_keying_material(&conn->ssl, out, out_len,
++	                                       label, os_strlen(label),
++	                                       context, context_len,
++	                                       context != NULL)
++	  : -1;
++  #elif MBEDTLS_VERSION_NUMBER >= 0x02120000 /* mbedtls 2.18.0 */
++	/* TLS <= 1.2 only, tls_prf_type will be 0 when TLS 1.3 is used. */
+ 	return (conn && conn->established && conn->tls_prf_type)
+ 	  ? mbedtls_ssl_tls_prf(conn->tls_prf_type,
+ 				conn->expkey_secret, conn->expkey_secret_len, label,
+@@ -2279,8 +2288,26 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
+ 			/* Need to return something to get final TLS ACK. */
+ 			conn->push_buf = wpabuf_alloc(0);
+ 
+-		if (appl_data /*&& conn->pull_buf && wpabuf_len(conn->pull_buf)*/)
+-			*appl_data = NULL; /* RFE: check for application data */
++		/* Decrypt any application data the peer sent after the handshake
++		 * completed. In particular, the EAP-TLS 1.3 "protected success
++		 * indication" (a single 0x00 byte) is sent in this way, and the
++		 * EAP-TLS peer relies on this being returned to observe completion. */
++		if (appl_data && conn->pull_buf &&
++		    wpabuf_len(conn->pull_buf) > conn->pull_buf_offset) {
++			struct wpabuf *ad = wpabuf_alloc(
++			    wpabuf_len(conn->pull_buf) - conn->pull_buf_offset);
++			if (ad) {
++				int res = mbedtls_ssl_read(&conn->ssl,
++				                           wpabuf_mhead(ad),
++				                           wpabuf_size(ad));
++				if (res > 0) {
++					wpabuf_put(ad, res);
++					*appl_data = ad;
++				} else {
++					wpabuf_free(ad);
++				}
++			}
++		}
+ 		break;
+ 	case MBEDTLS_ERR_SSL_WANT_WRITE:
+ 	case MBEDTLS_ERR_SSL_WANT_READ:
+diff --git a/tests/hwsim/test_ap_eap.py b/tests/hwsim/test_ap_eap.py
+index 756d3b1e3..30c759f73 100644
+--- a/tests/hwsim/test_ap_eap.py
++++ b/tests/hwsim/test_ap_eap.py
+@@ -136,9 +136,7 @@ def check_pkcs5_v15_support(dev):
+ 
+ def check_tls13_support(dev):
+     tls = dev.request("GET tls_library")
+-    if tls.startswith("mbed TLS"):
+-        raise HwsimSkip("TLS v1.3 not supported")
+-    ok = ['run=OpenSSL 1.1.1', 'run=OpenSSL 3.', 'wolfSSL']
++    ok = ['run=OpenSSL 1.1.1', 'run=OpenSSL 3.', 'wolfSSL', 'mbed TLS']
+     for s in ok:
+         if s in tls:
+             return
+-- 
+2.50.1 (Apple Git-155)
+

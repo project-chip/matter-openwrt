@@ -1,0 +1,33 @@
+From 06c942d3c8117b0f990467940a4db81c6ccd1ae9 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 22 Jul 2026 21:17:12 +1200
+Subject: [PATCH] mbedtls: Clear hostname for supplicant 3.6.3+ compatibility
+
+MbedTLS 3.6.3 and 2.28.10 introduced the requirement to set or explicitly clear
+the hostname when verifing a server certificate, otherwise verification fails
+with MBEDTLS_ERR_SSL_CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME. Explicitly
+clearing the hostname allows EAP-TLS to work correctly in the peer / supplicant
+role on those MbedTLS versions.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/tls_mbedtls.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
+index d83a3db73..69aa032a8 100644
+--- a/src/crypto/tls_mbedtls.c
++++ b/src/crypto/tls_mbedtls.c
+@@ -618,6 +618,9 @@ static int tls_mbedtls_ssl_setup(struct tls_connection *conn)
+ 	}
+ 
+ 	mbedtls_ssl_set_bio(&conn->ssl, conn, tls_push_func, tls_pull_func, NULL);
++	/* Avoid MBEDTLS_ERR_SSL_CERTIFICATE_VERIFICATION_WITHOUT_HOSTNAME
++	 * on Mbed TLS 2.28.10 or newer / 3.6.3 or newer. */
++	mbedtls_ssl_set_hostname(&conn->ssl, NULL);
+   #if MBEDTLS_VERSION_NUMBER >= 0x03000000 /* mbedtls 3.0.0 */
+ 	mbedtls_ssl_set_export_keys_cb(
+ 	    &conn->ssl, tls_connection_export_keys_cb, conn);
+-- 
+2.50.1 (Apple Git-155)
+
