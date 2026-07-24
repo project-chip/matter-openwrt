@@ -1,4 +1,4 @@
-From dc86613cfee5fe0b1ebb16b9e69a173b0be8fb80 Mon Sep 17 00:00:00 2001
+From de0152bc1cff6def47f8d0a34aa1630073ab3c49 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Tue, 21 Mar 2023 23:15:53 +1300
 Subject: [PATCH] OpenSSL: Configure TLS 1.3 ciphersuites from openssl_ciphers
@@ -24,14 +24,14 @@ suites it supports enabled at all times.
 
 Signed-off-by: Karsten Sperling <ksperling@apple.com>
 ---
- src/crypto/tls_openssl.c | 123 ++++++++++++++++++++++++++++++++++++---
- 1 file changed, 116 insertions(+), 7 deletions(-)
+ src/crypto/tls_openssl.c | 125 ++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 118 insertions(+), 7 deletions(-)
 
 diff --git a/src/crypto/tls_openssl.c b/src/crypto/tls_openssl.c
-index eab43df39..13016964a 100644
+index eab43df39..08a912e45 100644
 --- a/src/crypto/tls_openssl.c
 +++ b/src/crypto/tls_openssl.c
-@@ -123,6 +123,115 @@ static size_t SSL_SESSION_get_master_key(const SSL_SESSION *session,
+@@ -123,6 +123,117 @@ static size_t SSL_SESSION_get_master_key(const SSL_SESSION *session,
  
  #endif
  
@@ -79,6 +79,8 @@ index eab43df39..13016964a 100644
 +			ciphers_end += len;
 +			*ciphers_end++ = ':';
 +		}
++		if (!sep)
++			break;
 +		combined += len + 1;
 +	}
 +
@@ -147,7 +149,7 @@ index eab43df39..13016964a 100644
  #if OPENSSL_VERSION_NUMBER < 0x10100000L
  static const unsigned char * ASN1_STRING_get0_data(const ASN1_STRING *x)
  {
-@@ -1322,7 +1431,7 @@ void * tls_init(const struct tls_config *conf)
+@@ -1322,7 +1433,7 @@ void * tls_init(const struct tls_config *conf)
  		ciphers = conf->openssl_ciphers;
  	else
  		ciphers = TLS_DEFAULT_CIPHERS;
@@ -156,7 +158,7 @@ index eab43df39..13016964a 100644
  		wpa_printf(MSG_ERROR,
  			   "OpenSSL: Failed to set cipher string '%s'",
  			   ciphers);
-@@ -3374,7 +3483,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3374,7 +3485,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  				   openssl_ciphers);
  			ciphers = openssl_ciphers;
  		}
@@ -165,7 +167,7 @@ index eab43df39..13016964a 100644
  			wpa_printf(MSG_INFO,
  				   "OpenSSL: Failed to set Suite B ciphers");
  			return -1;
-@@ -3393,7 +3502,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3393,7 +3504,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  				   openssl_ciphers);
  			ciphers = openssl_ciphers;
  		}
@@ -174,7 +176,7 @@ index eab43df39..13016964a 100644
  			wpa_printf(MSG_INFO,
  				   "OpenSSL: Failed to set Suite B ciphers");
  			return -1;
-@@ -3481,7 +3590,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3481,7 +3592,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  	}
  #else /* OPENSSL_IS_BORINGSSL */
  	if (!(flags & (TLS_CONN_SUITEB | TLS_CONN_SUITEB_NO_ECDH)) &&
@@ -183,7 +185,7 @@ index eab43df39..13016964a 100644
  		wpa_printf(MSG_INFO,
  			   "OpenSSL: Failed to set openssl_ciphers '%s'",
  			   openssl_ciphers);
-@@ -3489,7 +3598,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3489,7 +3600,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  	}
  #endif /* OPENSSL_IS_BORINGSSL */
  #else /* CONFIG_SUITEB */
@@ -192,7 +194,7 @@ index eab43df39..13016964a 100644
  		wpa_printf(MSG_INFO,
  			   "OpenSSL: Failed to set openssl_ciphers '%s'",
  			   openssl_ciphers);
-@@ -5658,7 +5767,7 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
+@@ -5658,7 +5769,7 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
  	}
  #endif /* OPENSSL_IS_BORINGSSL */
  #endif /* CONFIG_SUITEB */
@@ -201,7 +203,7 @@ index eab43df39..13016964a 100644
  		wpa_printf(MSG_INFO,
  			   "OpenSSL: Failed to set cipher string '%s'",
  			   ciphers);
-@@ -5885,7 +5994,7 @@ int tls_global_set_params(void *tls_ctx,
+@@ -5885,7 +5996,7 @@ int tls_global_set_params(void *tls_ctx,
  		data->openssl_ciphers = NULL;
  	}
  	if (params->openssl_ciphers &&

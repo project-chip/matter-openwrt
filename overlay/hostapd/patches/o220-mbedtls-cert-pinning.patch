@@ -1,4 +1,4 @@
-From 917eb5e7667ffa41cb5d40135e1e31fddf7efb4f Mon Sep 17 00:00:00 2001
+From 44c7cb33937d277c2a8fa1838960699719bfa1d0 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 23 Jul 2026 01:10:57 +1200
 Subject: [PATCH] mbedtls: Add backend support for EAP-TLS client cert pinning
@@ -13,7 +13,7 @@ Signed-off-by: Karsten Sperling <ksperling@apple.com>
  1 file changed, 47 insertions(+), 4 deletions(-)
 
 diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
-index fcd8cbc65..6796181be 100644
+index 93e0ea035..71941b36f 100644
 --- a/src/crypto/tls_mbedtls.c
 +++ b/src/crypto/tls_mbedtls.c
 @@ -186,8 +186,10 @@ struct tls_connection {
@@ -28,7 +28,7 @@ index fcd8cbc65..6796181be 100644
  
  	mbedtls_ssl_context ssl;
  
-@@ -2003,17 +2005,31 @@ int tls_connection_set_verify(void *tls_ctx, struct tls_connection *conn,
+@@ -2005,17 +2007,31 @@ int tls_connection_set_verify(void *tls_ctx, struct tls_connection *conn,
  	if (conn == NULL)
  		return -1;
  
@@ -63,7 +63,7 @@ index fcd8cbc65..6796181be 100644
  		mbedtls_ssl_set_verify(&conn->ssl, tls_mbedtls_verify_cb, conn);
  	else
  		mbedtls_ssl_set_verify(&conn->ssl, NULL, NULL);
-@@ -2347,6 +2363,15 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
+@@ -2349,6 +2365,15 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
  				}
  			}
  		}
@@ -79,7 +79,7 @@ index fcd8cbc65..6796181be 100644
  		break;
  	case MBEDTLS_ERR_SSL_WANT_WRITE:
  	case MBEDTLS_ERR_SSL_WANT_READ:
-@@ -2692,6 +2717,17 @@ const char * tls_connection_get_peer_subject(struct tls_connection *conn)
+@@ -2694,6 +2719,17 @@ const char * tls_connection_get_peer_subject(struct tls_connection *conn)
  #endif
  
  
@@ -97,7 +97,7 @@ index fcd8cbc65..6796181be 100644
  #ifdef TLS_MBEDTLS_EAP_TEAP
  bool tls_connection_get_own_cert_used(struct tls_connection *conn)
  {
-@@ -3178,6 +3214,8 @@ tls_mbedtls_verify_cb (void *arg, mbedtls_x509_crt *crt, int depth, uint32_t *fl
+@@ -3180,6 +3216,8 @@ tls_mbedtls_verify_cb (void *arg, mbedtls_x509_crt *crt, int depth, uint32_t *fl
  	struct tls_conf *tls_conf = conn->tls_conf;
  	uint32_t flags_in = *flags;
  
@@ -106,7 +106,7 @@ index fcd8cbc65..6796181be 100644
  	if (depth > 8) { /*(depth 8 picked as arbitrary limit)*/
  		emsg(MSG_WARNING, "client cert chain too long");
  		*flags |= MBEDTLS_X509_BADCERT_OTHER; /* cert chain too long */
-@@ -3204,6 +3242,11 @@ tls_mbedtls_verify_cb (void *arg, mbedtls_x509_crt *crt, int depth, uint32_t *fl
+@@ -3206,6 +3244,11 @@ tls_mbedtls_verify_cb (void *arg, mbedtls_x509_crt *crt, int depth, uint32_t *fl
  		  #endif
  		}
  	}

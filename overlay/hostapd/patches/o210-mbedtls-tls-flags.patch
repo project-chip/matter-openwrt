@@ -1,4 +1,4 @@
-From 7616ee47ee45ab2de72de2d502f28db0e056db9a Mon Sep 17 00:00:00 2001
+From 7bfd35f832eb847e8d64baa9d4e987090752a85c Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Sat, 27 Jun 2026 22:20:38 +1200
 Subject: [PATCH] mbedtls: Improve tls_flags handling and avoid mutating shared
@@ -21,7 +21,7 @@ Signed-off-by: Karsten Sperling <ksperling@apple.com>
  1 file changed, 30 insertions(+), 22 deletions(-)
 
 diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
-index 65beeee3f..fcd8cbc65 100644
+index 96c3da57d..93e0ea035 100644
 --- a/src/crypto/tls_mbedtls.c
 +++ b/src/crypto/tls_mbedtls.c
 @@ -641,21 +641,21 @@ static int tls_mbedtls_data_is_pem(const u8 *data)
@@ -112,7 +112,7 @@ index 65beeee3f..fcd8cbc65 100644
  }
  
  
-@@ -1773,7 +1780,8 @@ static int tls_mbedtls_set_params(struct tls_conf *tls_conf,
+@@ -1775,7 +1782,8 @@ static int tls_mbedtls_set_params(struct tls_conf *tls_conf,
  		mbedtls_ssl_conf_dhm_min_bitlen(&tls_conf->conf, 3072);
  	}
  

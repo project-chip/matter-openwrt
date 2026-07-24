@@ -1,0 +1,76 @@
+From c299e99ef1d14abfe357b8dea57580e22fb18fa0 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Fri, 24 Jul 2026 13:15:20 +1200
+Subject: [PATCH] Populate EAPOL eap_type_authsrv when using eap_server=1
+
+This field was previously only populated in the RADIUS passthrough code path in
+ieee802_1x_decapsulate_radius(). Moving the logic into eapol_auth_tx_req()
+means it covers both the RADIUS and internal EAP server paths.
+
+This fixes the EAP type captured in the PMKSA cache and displayed in log
+messages (e.g. "IEEE 802.1X: authenticated - EAP type: 13" instead of 0), and
+avoids bogus "Supplicant used different EAP type" logs on EAP failure.
+
+The call to eap_get_type() is now also guarded by a check for EAP_CODE_REQUEST,
+which avoids mis-counting an EAP_ERP_TYPE_REAUTH_START as an Identity Request
+in dot1xAuthEapolReqIdFramesTx.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/ap/ieee802_1x.c            |  2 --
+ src/eapol_auth/eapol_auth_sm.c | 12 +++++++++++-
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/ap/ieee802_1x.c b/src/ap/ieee802_1x.c
+index 5f0b579a0..90bc43d70 100644
+--- a/src/ap/ieee802_1x.c
++++ b/src/ap/ieee802_1x.c
+@@ -1566,8 +1566,6 @@ static void ieee802_1x_decapsulate_radius(struct hostapd_data *hapd,
+ 	hdr = wpabuf_head(eap);
+ 	switch (hdr->code) {
+ 	case EAP_CODE_REQUEST:
+-		if (eap_type >= 0)
+-			sm->eap_type_authsrv = eap_type;
+ 		os_snprintf(buf, sizeof(buf), "EAP-Request-%s (%d)",
+ 			    eap_server_get_name(0, eap_type), eap_type);
+ 		break;
+diff --git a/src/eapol_auth/eapol_auth_sm.c b/src/eapol_auth/eapol_auth_sm.c
+index af962eefe..150635c6d 100644
+--- a/src/eapol_auth/eapol_auth_sm.c
++++ b/src/eapol_auth/eapol_auth_sm.c
+@@ -106,6 +106,9 @@ static void eapol_auth_tx_canned_eap(struct eapol_state_machine *sm,
+ 
+ static void eapol_auth_tx_req(struct eapol_state_machine *sm)
+ {
++	const struct eap_hdr *hdr;
++	enum eap_type type = EAP_TYPE_NONE;
++
+ 	if (sm->eap_if->eapReqData == NULL ||
+ 	    wpabuf_len(sm->eap_if->eapReqData) < sizeof(struct eap_hdr)) {
+ 		eapol_auth_logger(sm->eapol, sm->addr,
+@@ -122,6 +125,13 @@ static void eapol_auth_tx_req(struct eapol_state_machine *sm)
+ 		return;
+ 	}
+ 
++	hdr = wpabuf_head(sm->eap_if->eapReqData);
++	if (hdr->code == EAP_CODE_REQUEST) {
++		type = eap_get_type(sm->eap_if->eapReqData);
++		if (type != EAP_TYPE_NONE)
++			sm->eap_type_authsrv = type;
++	}
++
+ 	sm->last_eap_id = eap_get_id(sm->eap_if->eapReqData);
+ 	eapol_auth_vlogger(sm->eapol, sm->addr, EAPOL_LOGGER_DEBUG,
+ 			   "Sending EAP Packet (identifier %d)",
+@@ -131,7 +141,7 @@ static void eapol_auth_tx_req(struct eapol_state_machine *sm)
+ 				 wpabuf_head(sm->eap_if->eapReqData),
+ 				 wpabuf_len(sm->eap_if->eapReqData));
+ 	sm->dot1xAuthEapolFramesTx++;
+-	if (eap_get_type(sm->eap_if->eapReqData) == EAP_TYPE_IDENTITY)
++	if (type == EAP_TYPE_IDENTITY)
+ 		sm->dot1xAuthEapolReqIdFramesTx++;
+ 	else
+ 		sm->dot1xAuthEapolReqFramesTx++;
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,4 +1,4 @@
-From c1427bc029d8b17c31970583e06c76d2d228f17c Mon Sep 17 00:00:00 2001
+From 291ecbd493f3aff3a561531cf982ce4f01c0f2ae Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 3 Jul 2026 23:12:12 +1200
 Subject: [PATCH] EAP-TLS server: Add support for client cert pinning
@@ -238,10 +238,10 @@ index f839f9dfb..74860ba96 100644
   * tls_connection_get_own_cert_used - Was own certificate used
   * @conn: Connection context data from tls_connection_init()
 diff --git a/src/crypto/tls_openssl.c b/src/crypto/tls_openssl.c
-index 13016964a..25da1c738 100644
+index 08a912e45..58c38c1fb 100644
 --- a/src/crypto/tls_openssl.c
 +++ b/src/crypto/tls_openssl.c
-@@ -3668,6 +3668,13 @@ int tls_connection_set_verify(void *ssl_ctx, struct tls_connection *conn,
+@@ -3670,6 +3670,13 @@ int tls_connection_set_verify(void *ssl_ctx, struct tls_connection *conn,
  		SSL_set_verify(conn->ssl, SSL_VERIFY_NONE, NULL);
  	}
  
@@ -255,7 +255,7 @@ index 13016964a..25da1c738 100644
  	if (tls_set_conn_flags(conn, flags, NULL) < 0)
  		return -1;
  	conn->flags = flags;
-@@ -6310,6 +6317,14 @@ const char * tls_connection_get_peer_subject(struct tls_connection *conn)
+@@ -6312,6 +6319,14 @@ const char * tls_connection_get_peer_subject(struct tls_connection *conn)
  }
  
  

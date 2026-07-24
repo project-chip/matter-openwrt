@@ -1,4 +1,4 @@
-From 81a9609a48c87cdf15f65fbd9a15403a495ef81c Mon Sep 17 00:00:00 2001
+From bff4024b0561f2fca50488a7339ad352865bb891 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 26 Jun 2026 14:57:31 +1200
 Subject: [PATCH] mbedtls: Accept standard IANA TLS 1.3 ciphersuite names
@@ -16,14 +16,14 @@ translation logic continue to work.)
 
 Signed-off-by: Karsten Sperling <ksperling@apple.com>
 ---
- src/crypto/tls_mbedtls.c | 31 +++++++++++++++++++++++++++++++
- 1 file changed, 31 insertions(+)
+ src/crypto/tls_mbedtls.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
 
 diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
-index 6c766bcf2..65beeee3f 100644
+index 6c766bcf2..96c3da57d 100644
 --- a/src/crypto/tls_mbedtls.c
 +++ b/src/crypto/tls_mbedtls.c
-@@ -1225,6 +1225,37 @@ tls_mbedtls_set_ciphers(struct tls_conf *tls_conf, const char *ciphers)
+@@ -1225,6 +1225,39 @@ tls_mbedtls_set_ciphers(struct tls_conf *tls_conf, const char *ciphers)
          if (clen == 7 && os_memcmp(ciphers, "-aECDSA", 7) == 0)
              continue;
  
@@ -33,6 +33,7 @@ index 6c766bcf2..65beeee3f 100644
 +         * for these (e.g. "TLS-AES128-GCM-SHA256" from the mbedtls name
 +         * "TLS1-3-AES-128-GCM-SHA256"). This ensures the standard names work
 +         * consistently across all backends. */
++#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
 +        if (clen > 4 && os_memcmp(ciphers, "TLS_", 4) == 0) {
 +            static const struct { const char *name; int id; } tls13_suites[] = {
 +                { "TLS_AES_128_GCM_SHA256",       MBEDTLS_TLS1_3_AES_128_GCM_SHA256 },
@@ -57,6 +58,7 @@ index 6c766bcf2..65beeee3f 100644
 +            if (tls13)
 +                continue;
 +        }
++#endif /* MBEDTLS_SSL_PROTO_TLS1_3 */
 +
          /* attempt to match mbedtls cipher names
           * nb: does not support openssl group names or list manipulation syntax
