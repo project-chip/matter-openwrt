@@ -1,7 +1,7 @@
-From 875543a791f91c2ada64977ce5fc75502c8daf1e Mon Sep 17 00:00:00 2001
+From c72e6c997cac67d17acfe97a2ffa7ca359267c35 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 10 Oct 2025 22:29:18 +1300
-Subject: [PATCH] Add OTBR_EXTERNAL_MBEDTLS build setting
+Subject: [PATCH 01/19] Add OTBR_EXTERNAL_MBEDTLS build setting
 
 This works the same as (and propagates to OT_EXTERNAL_MBEDTLS).
 ---
@@ -14,11 +14,11 @@ This works the same as (and propagates to OT_EXTERNAL_MBEDTLS).
  6 files changed, 14 insertions(+), 6 deletions(-)
 
 diff --git a/etc/cmake/options.cmake b/etc/cmake/options.cmake
-index 1339b3b2..8183bb19 100644
+index b88485b0..a12547e4 100644
 --- a/etc/cmake/options.cmake
 +++ b/etc/cmake/options.cmake
-@@ -40,6 +40,13 @@ elseif (OTBR_MDNS STREQUAL "openthread")
-     target_compile_definitions(otbr-config INTERFACE OTBR_ENABLE_MDNS_OPENTHREAD=1)
+@@ -39,6 +39,13 @@ elseif (OTBR_MDNS STREQUAL "avahi")
+     message(FATAL_ERROR "OTBR_MDNS=avahi is no longer supported. Use OTBR_MDNS=openthread or OTBR_MDNS=mDNSResponder.")
  endif()
  
 +set(OTBR_EXTERNAL_MBEDTLS "" CACHE STRING "Specify external mbedtls library")
@@ -78,10 +78,10 @@ index 2974cf52..79e559d3 100644
      otbr-utils
      otbr-posix
 diff --git a/third_party/openthread/CMakeLists.txt b/third_party/openthread/CMakeLists.txt
-index eddf5ce1..3b7dbf1e 100644
+index bc327afd..fa729f2d 100644
 --- a/third_party/openthread/CMakeLists.txt
 +++ b/third_party/openthread/CMakeLists.txt
-@@ -51,6 +51,7 @@ set(OT_DNS_CLIENT_OVER_TCP OFF CACHE STRING "disable DNS query over TCP")
+@@ -50,6 +50,7 @@ set(OT_DNS_CLIENT_OVER_TCP OFF CACHE STRING "disable DNS query over TCP")
  set(OT_DNS_UPSTREAM_QUERY ${OTBR_DNS_UPSTREAM_QUERY} CACHE STRING "enable sending DNS queries to upstream" FORCE)
  set(OT_ECDSA ON CACHE STRING "enable ECDSA" FORCE)
  set(OT_EXTERNAL_HEAP ON CACHE STRING "enable external heap" FORCE)
@@ -111,6 +111,3 @@ index 5e8451af..7df5c690 100644
  )
  
  if ($ENV{REFERENCE_DEVICE})
--- 
-2.50.1 (Apple Git-155)
-
