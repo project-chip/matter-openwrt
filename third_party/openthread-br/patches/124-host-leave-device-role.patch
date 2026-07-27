@@ -1,0 +1,47 @@
+From fb921e217d4733ca4c701e068b16c2d6f81d1e17 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 22:52:46 +0200
+Subject: [PATCH] [host] erase the dataset in Leave based on the device role
+
+Leave() decides whether it can erase immediately by looking at
+mThreadEnabledState, but that state machine only moves through
+SetThreadEnabled(). When the stack was started another way (the ubus
+threadstart method, ot-ctl), the state still reads disabled while the
+device is attached, Leave() takes the shortcut, and
+otInstanceErasePersistentInfo() fails silently because the stack is
+running: the caller is told the dataset was erased when nothing
+happened. Observed through the ubus deprovision method on a Turris
+Omnia, where deprovision returned success yet the device stayed
+attached with its dataset intact.
+
+Branch on the actual device role instead. A detached-but-enabled stack
+now goes through the graceful-detach path, which disables the protocol
+before erasing.
+
+Assisted-By: Claude Opus 5
+---
+ src/host/rcp_host.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/host/rcp_host.cpp b/src/host/rcp_host.cpp
+index 73f9aa20..95be1c97 100644
+--- a/src/host/rcp_host.cpp
++++ b/src/host/rcp_host.cpp
+@@ -600,7 +600,13 @@ void RcpHost::Leave(bool aEraseDataset, const AsyncResultReceiver &aReceiver)
+     VerifyOrExit(mThreadEnabledState != ThreadEnabledState::kStateDisabling, error = OT_ERROR_BUSY,
+                  errorMsg = "Thread is disabling");
+ 
+-    if (mThreadEnabledState == ThreadEnabledState::kStateDisabled)
++    // Branch on the actual device role, not mThreadEnabledState: when the
++    // stack was started outside SetThreadEnabled() (ubus threadstart, ot-ctl)
++    // the state machine still says disabled, and taking the shortcut then
++    // makes otInstanceErasePersistentInfo() fail silently -- the caller is
++    // told the dataset was erased when nothing happened. The role reflects
++    // what the stack is really doing.
++    if (otThreadGetDeviceRole(mInstance) == OT_DEVICE_ROLE_DISABLED)
+     {
+         ConditionalErasePersistentInfo(aEraseDataset);
+         ExitNow();
+-- 
+2.55.0
+

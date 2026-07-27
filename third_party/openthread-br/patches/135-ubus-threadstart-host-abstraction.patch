@@ -1,0 +1,106 @@
+From 921cbcaa7c18155ff290bd0932b749e8654857e9 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 22:52:46 +0200
+Subject: [PATCH] [ubus] drive threadstart and threadstop through the host
+ abstraction
+
+The two methods enabled and disabled the stack with direct otThread /
+otIp6 calls, which leaves RcpHost's enabled-state machine reading
+disabled while Thread runs. Everything that consults that state then
+misbehaves: ScheduleMigration() refuses with InvalidState, and Leave()
+skips its dataset erase, so on a router whose interface came up through
+netifd (which starts Thread via threadstart), neither set_pending nor
+deprovision worked.
+
+Route both methods through SetThreadEnabled(), which moves the state
+machine, and keep threadstart's contract of actually starting the stack
+with follow-up direct calls; both are no-ops when it is already up.
+threadstop now detaches gracefully before disabling, which it
+previously did not.
+
+Assisted-By: Claude Opus 5
+---
+ src/openwrt/ubus/otubus.cpp | 59 ++++++++++++++++++++++++++++++-------
+ 1 file changed, 48 insertions(+), 11 deletions(-)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 86b58aec..21ee699c 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -240,25 +240,62 @@ int UbusServer::HandleLeave(ubus_request_data *aRequest)
+ 
+ int UbusServer::HandleThreadStart(ubus_request_data *aRequest)
+ {
+-    otError error = OT_ERROR_NONE;
++    auto respond = DeferResponse(aRequest);
++
++    // Going through the host abstraction keeps RcpHost's enabled-state
++    // machine in sync; enabling the stack directly leaves it saying
++    // disabled, which makes ScheduleMigration() refuse to run and Leave()
++    // silently skip its dataset erase. SetThreadEnabled() only starts the
++    // stack when a dataset is already committed, so follow up with the
++    // direct calls to keep this method's contract of actually starting
++    // Thread; both are no-ops when the stack is already up.
++    mHost.SetThreadEnabled(true, [this, respond](otError aError, const std::string &aInfo) {
++        otError error = aError;
++
++        if (error == OT_ERROR_NOT_IMPLEMENTED)
++        {
++            // NCP does not implement SetThreadEnabled and does not need it.
++            error = OT_ERROR_NONE;
++        }
+ 
+-    SuccessOrExit(error = otIp6SetEnabled(mHost.GetInstance(), true));
+-    SuccessOrExit(error = otThreadSetEnabled(mHost.GetInstance(), true));
++        if (error == OT_ERROR_NONE)
++        {
++            otOperationalDatasetTlvs dataset;
++
++            // Preserve the old contract: starting without a dataset is an
++            // error. Forcing MLE up without one leaves the stack scanning in
++            // the detached role forever, and blocks provision, which requires
++            // the disabled role.
++            if (otDatasetGetActiveTlvs(mHost.GetInstance(), &dataset) != OT_ERROR_NONE)
++            {
++                error = OT_ERROR_INVALID_STATE;
++            }
++        }
++
++        if (error == OT_ERROR_NONE)
++        {
++            error = otIp6SetEnabled(mHost.GetInstance(), true);
++        }
++
++        if (error == OT_ERROR_NONE)
++        {
++            error = otThreadSetEnabled(mHost.GetInstance(), true);
++        }
++
++        respond(error, aInfo);
++    });
+ 
+-exit:
+-    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+ int UbusServer::HandleThreadStop(ubus_request_data *aRequest)
+ {
+-    otError error = OT_ERROR_NONE;
+-
+-    SuccessOrExit(error = otThreadSetEnabled(mHost.GetInstance(), false));
+-    SuccessOrExit(error = otIp6SetEnabled(mHost.GetInstance(), false));
++    // The counterpart of threadstart: SetThreadEnabled(false) detaches
++    // gracefully before disabling the stack, and moves the host state
++    // machine along with it, where the direct calls would leave it saying
++    // enabled.
++    mHost.SetThreadEnabled(false, DeferResponse(aRequest));
+ 
+-exit:
+-    SendInvokeResponse(aRequest, &mBuf, error);
+     return 0;
+ }
+ 
+-- 
+2.55.0
+

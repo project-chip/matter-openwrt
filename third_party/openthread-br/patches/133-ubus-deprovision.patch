@@ -1,0 +1,67 @@
+From 639c356070f55f458f5cafe0e2d98ee4016ec2b7 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 07:30:02 +0200
+Subject: [PATCH] [ubus] add a deprovision method
+
+provision has no counterpart: the only way to clear a dataset over ubus is
+leave, which factory resets the whole OpenThread instance and does not
+return. That is far too destructive for undoing a provisioning attempt.
+
+Add deprovision, forwarding to ThreadHost::Leave() with aEraseDataset set,
+which detaches gracefully and then erases the dataset, returning the device
+to the state provision expects. It is implemented for both RcpHost and
+NcpHost.
+
+This is what the Thread Border Router Management cluster needs for
+RevertActiveDataset(), which runs when a fail-safe expires after a dataset
+was set but never committed.
+
+Assisted-By: Claude Opus 5
+---
+ src/openwrt/ubus/otubus.cpp | 10 ++++++++++
+ src/openwrt/ubus/otubus.hpp |  1 +
+ 2 files changed, 11 insertions(+)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index f8d4101d..e64c8207 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -1234,6 +1234,15 @@ exit:
+     return 0;
+ }
+ 
++int UbusServer::HandleDeprovision(ubus_request_data *aRequest)
++{
++    // Detach gracefully and erase the dataset, returning the device to the
++    // unprovisioned state that provision expects. This is the counterpart of
++    // provision, not of leave, which factory resets the whole instance.
++    mHost.Leave(/* aEraseDataset */ true, DeferResponse(aRequest));
++    return 0;
++}
++
+ static constexpr blobmsg_policy kSetPendingPolicy[] = {
+     [0] = {.name = "dataset", .type = BLOBMSG_TYPE_STRING},
+ };
+@@ -1331,6 +1340,7 @@ const ubus_method UbusServer::sMethods[] = {
+     OTBR_UBUS_METHOD_NOARG("status", &UbusServer::HandleStatus),
+     OTBR_UBUS_METHOD("provision", &UbusServer::HandleProvision, kProvisionPolicy),
+     OTBR_UBUS_METHOD("set_pending", &UbusServer::HandleSetPending, kSetPendingPolicy),
++    OTBR_UBUS_METHOD_NOARG("deprovision", &UbusServer::HandleDeprovision),
+ };
+ 
+ ubus_object_type UbusServer::sObjectType = UBUS_OBJECT_TYPE("otbr", sMethods);
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index c587010d..4a3417cd 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -122,6 +122,7 @@ private:
+     int HandleStatus(ubus_request_data *aRequest);
+     int HandleProvision(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
+     int HandleSetPending(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleDeprovision(ubus_request_data *aRequest);
+ 
+     // === Callbacks ===
+ 
+-- 
+2.55.0
+

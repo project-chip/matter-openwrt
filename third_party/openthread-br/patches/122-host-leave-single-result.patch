@@ -1,0 +1,37 @@
+From dbe6618e80400db6a5290fc64a5ed88b5ab0fb94 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 07:29:24 +0200
+Subject: [PATCH] [host] do not report the result of Leave twice
+
+RcpHost::Leave() leaves receiveResultHere set when it hands off to
+ThreadDetachGracefully(), so it falls through to the exit label and posts a
+result in addition to the one the detach callback delivers. The receiver is
+therefore invoked twice for every successful leave.
+
+Join() and SetThreadEnabled() clear the flag on their asynchronous paths;
+do the same here.
+
+This is currently latent: the only caller of ThreadHost::Leave() is the NCP
+D-Bus object, and NcpHost::Leave() is unaffected. It becomes reachable as
+soon as anything calls it in RCP mode.
+
+Assisted-By: Claude Opus 5
+---
+ src/host/rcp_host.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/host/rcp_host.cpp b/src/host/rcp_host.cpp
+index f6d13584..a54bcd6f 100644
+--- a/src/host/rcp_host.cpp
++++ b/src/host/rcp_host.cpp
+@@ -613,6 +613,7 @@ void RcpHost::Leave(bool aEraseDataset, const AsyncResultReceiver &aReceiver)
+             aReceiver(OT_ERROR_NONE, "");
+         }
+     });
++    receiveResultHere = false;
+ 
+ exit:
+     if (receiveResultHere)
+-- 
+2.55.0
+
