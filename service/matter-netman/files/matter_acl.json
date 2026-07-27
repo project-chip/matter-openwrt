@@ -2,9 +2,18 @@
 	"user": "matter",
 	"access": {
 		"otbr": {
-			"methods": ["*"]
+			"methods": [
+				"*"
+			]
 		}
 	},
-	"subscribe": [ "otbr" ],
-	"listen": [ "ubus.object.*" ]
+	"subscribe": [
+		"otbr"
+	],
+	"listen": [
+		"ubus.object.*"
+	],
+	"publish": [
+		"matter"
+	]
 }

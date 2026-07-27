@@ -1,0 +1,24 @@
+#!/bin/sh
+# The daemon's mDNS sockets do not survive the interface they are bound to
+# bouncing, which leaves the node undiscoverable and unreachable for CASE
+# until the daemon restarts. netifd runs these hooks on every interface
+# state change; restart the daemon when the network device otbr-agent uses
+# as its backbone comes back up.
+
+[ "$ACTION" = "ifup" ] || exit 0
+/etc/init.d/matter running || exit 0
+
+. /lib/functions.sh
+
+is_backbone=0
+check_agent() {
+	local infra
+	config_get infra "$1" infra_if_name
+	[ -n "$infra" ] && [ "$infra" = "$DEVICE" ] && is_backbone=1
+}
+config_load otbr-agent
+config_foreach check_agent otbr-agent
+[ "$is_backbone" = 1 ] || exit 0
+
+logger -t matter "backbone device $DEVICE came up, restarting the Matter daemon to rebind mDNS"
+/etc/init.d/matter restart

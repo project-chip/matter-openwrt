@@ -145,7 +145,6 @@ TARGET_CFLAGS+=\
 	-DCHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING=\"$(PKG_VERSION)@$(OS_VERSION)\" \
 	-DCHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION_STRING=\"-\" \
 	-DCHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME=\"$(VERSION_DIST)\" \
-	-DCHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME=\"\" \
 	-DCHIP_DEVICE_CONFIG_TEST_SERIAL_NUMBER=\"\"
 
 # https://github.com/openwrt/openwrt/issues/13016
@@ -169,11 +168,12 @@ define Build/Compile
 endef
 
 define Package/matter-netman/default/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) $(OUT_DIR)/matter-network-manager-app $(1)/usr/sbin
 	$(INSTALL_DATA) ./files/bootstrap.sh $(1)/usr/share/matter/
 	$(INSTALL_DATA) ./files/matter_acl.json $(1)/usr/share/acl.d
 	$(INSTALL_BIN) ./files/matter.init $(1)/etc/init.d/matter
+	$(INSTALL_BIN) ./files/matter.iface-hotplug $(1)/etc/hotplug.d/iface/99-matter
 endef
 
 Package/matter-netman-mbedtls/install=$(Package/matter-netman/default/install)

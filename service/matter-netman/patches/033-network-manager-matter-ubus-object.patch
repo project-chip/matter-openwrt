@@ -1,0 +1,356 @@
+From c16c137f98c6ae7392e84641abf395bee1210469 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Tue, 28 Jul 2026 04:11:25 +0200
+Subject: [PATCH] [network-manager] publish a matter ubus object
+
+The daemon's onboarding code only lives in its log, and once the device
+is commissioned nothing on the router itself can pair it with another
+controller: the initial code stops being valid and opening a window
+takes a Matter administrator. Publish a "matter" ubus object with the
+device's own view of all of this:
+
+- status: fabric count, commissioning window state, and the onboarding
+  payload (manual pairing code, QR code, ids), so a router UI can show
+  the real thing instead of deriving it from configuration files.
+- open_commissioning_window / close_commissioning_window: local control
+  of a basic commissioning window, during which the device's own
+  onboarding code authenticates, so the code the UI shows is usable
+  even after the device has been commissioned.
+
+The object is re-published after ubus reconnects; ubusd needs a publish
+ACL for it, which the packaging installs.
+
+Assisted-By: Claude Opus 5
+---
+ examples/network-manager-app/linux/BUILD.gn   |   2 +
+ .../linux/MatterUbusService.cpp               | 172 ++++++++++++++++++
+ .../linux/MatterUbusService.h                 |  38 ++++
+ .../network-manager-app/linux/UbusManager.cpp |  17 ++
+ .../network-manager-app/linux/UbusManager.h   |   7 +-
+ examples/network-manager-app/linux/main.cpp   |   7 +
+ 6 files changed, 242 insertions(+), 1 deletion(-)
+ create mode 100644 examples/network-manager-app/linux/MatterUbusService.cpp
+ create mode 100644 examples/network-manager-app/linux/MatterUbusService.h
+
+diff --git a/examples/network-manager-app/linux/BUILD.gn b/examples/network-manager-app/linux/BUILD.gn
+index 27119a8276..580f03f830 100644
+--- a/examples/network-manager-app/linux/BUILD.gn
++++ b/examples/network-manager-app/linux/BUILD.gn
+@@ -39,6 +39,8 @@ executable("matter-network-manager-app") {
+   if (matter_enable_ubus) {
+     defines += [ "MATTER_ENABLE_UBUS=1" ]
+     sources += [
++      "MatterUbusService.cpp",
++      "MatterUbusService.h",
+       "ThreadBROpenThreadUbus.cpp",
+       "ThreadBROpenThreadUbus.h",
+       "UboxUtils.cpp",
+diff --git a/examples/network-manager-app/linux/MatterUbusService.cpp b/examples/network-manager-app/linux/MatterUbusService.cpp
+new file mode 100644
+index 0000000000..41b9d3b26f
+--- /dev/null
++++ b/examples/network-manager-app/linux/MatterUbusService.cpp
+@@ -0,0 +1,172 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#include "MatterUbusService.h"
++
++#include "UboxUtils.h"
++
++#include <app/server/Server.h>
++#include <lib/support/CodeUtils.h>
++#include <platform/CHIPDeviceLayer.h>
++#include <setup_payload/OnboardingCodesUtil.h>
++
++extern "C" {
++#include <libubus.h>
++#undef fallthrough
++}
++
++using namespace chip::app::Clusters::AdministratorCommissioning;
++
++namespace chip {
++
++namespace {
++
++// The spec caps a commissioning window at 15 minutes; default to the maximum,
++// since the code is meant to be typed into a controller by a person.
++constexpr uint32_t kDefaultWindowSeconds = 900;
++constexpr uint32_t kMinWindowSeconds     = 180;
++
++const char * WindowStatusString()
++{
++    // Not CommissioningWindowStatusForCluster(): that deliberately reports
++    // locally opened windows as closed, because the cluster attribute only
++    // covers windows opened through it. Here the local ones are the point.
++    auto & mgr = Server::GetInstance().GetCommissioningWindowManager();
++    if (!mgr.IsCommissioningWindowOpen())
++    {
++        return "closed";
++    }
++    switch (mgr.CommissioningWindowStatusForCluster())
++    {
++    case CommissioningWindowStatusEnum::kEnhancedWindowOpen:
++        return "enhanced";
++    case CommissioningWindowStatusEnum::kBasicWindowOpen:
++    default:
++        // A window opened locally is always a basic window.
++        return "basic";
++    }
++}
++
++void AddOnboarding(ubus::BlobMsgBuf & buf)
++{
++    PayloadContents payload;
++    if (GetPayloadContents(payload, RendezvousInformationFlag::kOnNetwork) == CHIP_NO_ERROR)
++    {
++        char code[32] = {};
++        char qr[128]  = {};
++        MutableCharSpan codeSpan(code), qrSpan(qr);
++        if (GetManualPairingCode(codeSpan, payload) == CHIP_NO_ERROR)
++        {
++            buf.Add("ManualCode", static_cast<const char *>(code));
++        }
++        if (GetQRCode(qrSpan, payload) == CHIP_NO_ERROR)
++        {
++            buf.Add("QrCode", static_cast<const char *>(qr));
++        }
++        buf.Add("VendorId", static_cast<uint32_t>(payload.vendorID));
++        buf.Add("ProductId", static_cast<uint32_t>(payload.productID));
++        buf.Add("Discriminator", static_cast<uint32_t>(payload.discriminator.GetLongValue()));
++    }
++}
++
++int HandleStatus(ubus_context * ctx, ubus_object * obj, ubus_request_data * req, const char * method, blob_attr * msg)
++{
++    ubus::BlobMsgBuf buf;
++    buf.Add("Fabrics", static_cast<uint32_t>(Server::GetInstance().GetFabricTable().FabricCount()));
++    buf.Add("Window", WindowStatusString());
++    // The initial onboarding code authenticates commissioning only while no
++    // fabric is on the device (the initial basic window) or while a basic
++    // window is open; report it so a UI can decide what to show.
++    AddOnboarding(buf);
++    ubus_send_reply(ctx, req, buf.head);
++    return 0;
++}
++
++enum
++{
++    OPEN_WINDOW_TIMEOUT,
++    __OPEN_WINDOW_MAX,
++};
++
++const blobmsg_policy kOpenWindowPolicy[__OPEN_WINDOW_MAX] = {
++    [OPEN_WINDOW_TIMEOUT] = { .name = "timeout", .type = BLOBMSG_TYPE_INT32 },
++};
++
++int HandleOpenWindow(ubus_context * ctx, ubus_object * obj, ubus_request_data * req, const char * method, blob_attr * msg)
++{
++    // A caller can omit the argument table entirely; msg is NULL then.
++    blob_attr * tb[__OPEN_WINDOW_MAX] = {};
++    if (msg != nullptr)
++    {
++        blobmsg_parse(kOpenWindowPolicy, __OPEN_WINDOW_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
++    }
++
++    uint32_t timeout = kDefaultWindowSeconds;
++    if (tb[OPEN_WINDOW_TIMEOUT] != nullptr)
++    {
++        timeout = blobmsg_get_u32(tb[OPEN_WINDOW_TIMEOUT]);
++        VerifyOrReturnValue(timeout >= kMinWindowSeconds && timeout <= kDefaultWindowSeconds, UBUS_STATUS_INVALID_ARGUMENT);
++    }
++
++    // Opens a basic window: the device's own onboarding code becomes valid
++    // for the duration, which is what lets a router UI show a code that a
++    // controller can actually use after the device is already commissioned.
++    auto & mgr     = Server::GetInstance().GetCommissioningWindowManager();
++    CHIP_ERROR err = mgr.OpenBasicCommissioningWindow(System::Clock::Seconds32(timeout));
++
++    ubus::BlobMsgBuf buf;
++    buf.Add("Error", static_cast<uint32_t>(err == CHIP_NO_ERROR ? 0 : 1));
++    buf.Add("Window", WindowStatusString());
++    ubus_send_reply(ctx, req, buf.head);
++    return 0;
++}
++
++int HandleCloseWindow(ubus_context * ctx, ubus_object * obj, ubus_request_data * req, const char * method, blob_attr * msg)
++{
++    Server::GetInstance().GetCommissioningWindowManager().CloseCommissioningWindow();
++
++    ubus::BlobMsgBuf buf;
++    buf.Add("Error", static_cast<uint32_t>(0));
++    buf.Add("Window", WindowStatusString());
++    ubus_send_reply(ctx, req, buf.head);
++    return 0;
++}
++
++ubus_method sMethods[] = {
++    UBUS_METHOD_NOARG("status", HandleStatus),
++    UBUS_METHOD("open_commissioning_window", HandleOpenWindow, kOpenWindowPolicy),
++    UBUS_METHOD_NOARG("close_commissioning_window", HandleCloseWindow),
++};
++
++ubus_object_type sObjectType = UBUS_OBJECT_TYPE("matter", sMethods);
++
++ubus_object sObject = {
++    .name      = "matter",
++    .type      = &sObjectType,
++    .methods   = sMethods,
++    .n_methods = MATTER_ARRAY_SIZE(sMethods),
++};
++
++} // namespace
++
++CHIP_ERROR MatterUbusService::Init()
++{
++    mUbusManager.Host(sObject);
++    return CHIP_NO_ERROR;
++}
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/MatterUbusService.h b/examples/network-manager-app/linux/MatterUbusService.h
+new file mode 100644
+index 0000000000..165ff5906d
+--- /dev/null
++++ b/examples/network-manager-app/linux/MatterUbusService.h
+@@ -0,0 +1,38 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#pragma once
++
++#include "UbusManager.h"
++
++namespace chip {
++
++// Publishes a "matter" ubus object exposing this node's onboarding
++// information and local control of the commissioning window, so a router UI
++// can pair the device with a controller without access to the daemon's log.
++class MatterUbusService
++{
++public:
++    MatterUbusService(ubus::UbusManager & ubusManager) : mUbusManager(ubusManager) {}
++
++    CHIP_ERROR Init();
++
++private:
++    ubus::UbusManager & mUbusManager;
++};
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/UbusManager.cpp b/examples/network-manager-app/linux/UbusManager.cpp
+index 9595e11ec5..9091a47dd6 100644
+--- a/examples/network-manager-app/linux/UbusManager.cpp
++++ b/examples/network-manager-app/linux/UbusManager.cpp
+@@ -138,9 +138,26 @@ bool UbusManager::Connect()
+     VerifyOrReturnValue(CheckAndLog(ubus_connect_ctx(&Context(), mUbusSocketPath), "ubus_connect_ctx"), false);
+     Context().connection_lost = [](ubus_context * ctx) { static_cast<UbusManager *>(ctx)->HandleConnectionLost(); };
+     ubus_add_uloop(&Context());
++    if (mHostedObject != nullptr)
++    {
++        // A new connection means a new bus client: the object has to be
++        // published again. Ids assigned by a previous connection are stale.
++        mHostedObject->id = 0;
++        CheckAndLog(ubus_add_object(&Context(), mHostedObject), "ubus_add_object");
++    }
+     return true;
+ }
+ 
++void UbusManager::Host(ubus_object & object)
++{
++    VerifyOrDie(mInitialized && mHostedObject == nullptr);
++    mHostedObject = &object;
++    if (Connected())
++    {
++        CheckAndLog(ubus_add_object(&Context(), mHostedObject), "ubus_add_object");
++    }
++}
++
+ void UbusManager::Register(UbusWatch & watch)
+ {
+     VerifyOrDie(mInitialized);
+diff --git a/examples/network-manager-app/linux/UbusManager.h b/examples/network-manager-app/linux/UbusManager.h
+index 5f8c8b718b..2d56879796 100644
+--- a/examples/network-manager-app/linux/UbusManager.h
++++ b/examples/network-manager-app/linux/UbusManager.h
+@@ -50,10 +50,15 @@ public:
+     void Register(UbusWatch & watch);
+     void Unregister(UbusWatch & watch);
+ 
++    // Publishes a ubus object on the bus, re-adding it after reconnects.
++    // The object must outlive the manager; only one object is supported.
++    void Host(ubus_object & object);
++
+ private:
+     const char * const mUbusSocketPath;
+     IntrusiveList<UbusWatch> mWatches{};
+-    bool mInitialized = false;
++    ubus_object * mHostedObject = nullptr;
++    bool mInitialized           = false;
+ 
+     ///// Connection management
+ 
+diff --git a/examples/network-manager-app/linux/main.cpp b/examples/network-manager-app/linux/main.cpp
+index 9437c2fbce..5b3e2c0d08 100644
+--- a/examples/network-manager-app/linux/main.cpp
++++ b/examples/network-manager-app/linux/main.cpp
+@@ -30,6 +30,7 @@
+ #include <lib/support/Span.h>
+ 
+ #if MATTER_ENABLE_UBUS
++#include "MatterUbusService.h"
+ #include "ThreadBROpenThreadUbus.h"
+ #include "UbusManager.h"
+ #else
+@@ -49,6 +50,7 @@ ByteSpan ByteSpanFromCharSpan(CharSpan span)
+ 
+ #if MATTER_ENABLE_UBUS
+ ubus::UbusManager gUbusManager{};
++MatterUbusService gMatterUbusService{ gUbusManager };
+ #endif
+ 
+ std::optional<DefaultThreadNetworkDirectoryServer> gThreadNetworkDirectoryServer;
+@@ -111,6 +113,11 @@ void ApplicationInit()
+ {
+     TEMPORARY_RETURN_IGNORED gWiFiNetworkManagementServer->SetNetworkCredentials(ByteSpanFromCharSpan("MatterAP"_span),
+                                                                                  ByteSpanFromCharSpan("Setec Astronomy"_span));
++#if MATTER_ENABLE_UBUS
++    // Publish the "matter" ubus object once the server is up; its handlers
++    // read commissioning state owned by the server.
++    SuccessOrDie(gMatterUbusService.Init());
++#endif
+ }
+ 
+ void ApplicationShutdown()
+-- 
+2.55.0
+
