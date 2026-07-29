@@ -69,18 +69,17 @@ endef
 
 define Package/openthread-br
   $(call Package/openthread-br/Default)
-  VARIANT:=default
-  DEPENDS+= +PACKAGE_openthread-br:libdnssd
+  DEPENDS+= +libdnssd
 endef
 
 define Package/openthread-br/description
 $(call Package/openthread-br/Default/description)
 
-This default variant of the package uses mDNSResponder for mDNS / DNS-SD.
+Uses mDNSResponder for mDNS / DNS-SD.
 endef
 
 define Package/openthread-br/config
-if PACKAGE_openthread-br || PACKAGE_openthread-br-avahi
+if PACKAGE_openthread-br
 config OPENTHREADBR_SHARED_MBEDTLS
 	bool "Use shared mbedTLS library for OpenThread"
 	default n
@@ -92,25 +91,10 @@ config OPENTHREADBR_SHARED_MBEDTLS
 endif
 endef
 
-define Package/openthread-br-avahi
-  $(call Package/openthread-br/Default)
-  VARIANT:=avahi
-  PROVIDES:=openthread-br
-  CONFLICTS:=openthread-br
-  DEPENDS+= +PACKAGE_openthread-br-avahi:libavahi-client
-endef
-
-define Package/openthread-br-avahi/description
-$(call Package/openthread-br/Default/description)
-
-This variant of the package uses Avahi for mDNS / DNS-SD.
-endef
-
-
 define Package/openthread-br-luci
   $(call Package/openthread-br/Default)
   TITLE+= (LuCI module)
-  DEPENDS:=+luci-lua-runtime @PACKAGE_openthread-br||PACKAGE_openthread-br-avahi
+  DEPENDS:=+luci-lua-runtime @PACKAGE_openthread-br
 endef
 
 define Package/openthread-br-luci/description
@@ -126,6 +110,7 @@ CMAKE_OPTIONS+= \
 	-DBUILD_TESTING=OFF \
 	-DOTBR_OPENWRT=ON \
 	-DOTBR_VENDOR_NAME=$(VERSION_MANUFACTURER) \
+	-DOTBR_MDNS=mDNSResponder \
 	-DOTBR_BORDER_AGENT=ON \
 	-DOTBR_BORDER_ROUTING=ON \
 	-DOTBR_NAT64=OFF \
@@ -144,12 +129,6 @@ ifneq ($(CONFIG_OPENTHREADBR_SHARED_MBEDTLS),)
 CMAKE_OPTIONS+= -DOTBR_EXTERNAL_MBEDTLS="mbedtls;mbedcrypto;mbedx509"
 endif
 
-ifeq ($(BUILD_VARIANT),avahi)
-CMAKE_OPTIONS+= -DOTBR_MDNS=avahi
-else
-CMAKE_OPTIONS+= -DOTBR_MDNS=mDNSResponder
-endif
-
 define Package/openthread-br/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config $(1)/etc/uci-defaults $(1)/etc/hotplug.d/usb
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/sbin/otbr-agent $(1)/usr/sbin
@@ -166,9 +145,6 @@ define Package/openthread-br/conffiles
 /etc/openthread/
 endef
 
-Package/openthread-br-avahi/install=$(Package/openthread-br/install)
-Package/openthread-br-avahi/conffiles=$(Package/openthread-br/conffiles)
-
 define Package/openthread-br-luci/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller/admin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/openwrt/controller/thread.lua $(1)/usr/lib/lua/luci/controller/admin
@@ -181,5 +157,4 @@ define Package/openthread-br-luci/install
 endef
 
 $(eval $(call BuildPackage,openthread-br))
-$(eval $(call BuildPackage,openthread-br-avahi))
 $(eval $(call BuildPackage,openthread-br-luci))
