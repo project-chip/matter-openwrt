@@ -1,0 +1,129 @@
+From 64f8a13daae3f2a6f47f68b0c86dfbd78bd85555 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Thu, 30 Jul 2026 07:29:29 +0200
+Subject: [PATCH] [app][platform] add hooks for out-of-process network
+ diagnostics
+
+Three small hooks for applications whose network state lives outside
+the Matter process:
+
+- Thread Network Diagnostics: SetDefaultThreadNetworkDiagnosticsProvider()
+  lets an application substitute the provider behind codegen-integrated
+  cluster instances, which otherwise requires the in-process Thread
+  stack. Passing nullptr restores the default.
+- Thread Network Directory: a Storage() accessor on the server so an
+  application can seed the directory with networks it knows about on
+  its own, e.g. a border router recording its own network.
+- Linux ConnectivityUtils: honour CHIP_ETHERNET_INTERFACE when picking
+  the Ethernet diagnostics interface. On a multi-homed host the first
+  ethtool-capable interface is not necessarily the one the node lives
+  on; a router typically speaks through a bridge.
+
+No behavior changes unless a hook is used; the network-manager example
+uses all three in the following commit.
+
+Assisted-By: Claude Fable 5
+---
+ .../CodegenIntegration.cpp                        | 15 +++++++++++++--
+ .../ThreadNetworkDiagnosticsProvider.h            |  6 ++++++
+ .../CodegenIntegration.h                          |  4 ++++
+ src/platform/Linux/ConnectivityUtils.cpp          | 11 +++++++++++
+ 4 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/src/app/clusters/thread-network-diagnostics-server/CodegenIntegration.cpp b/src/app/clusters/thread-network-diagnostics-server/CodegenIntegration.cpp
+index 7bc1aef635..e9ece74084 100644
+--- a/src/app/clusters/thread-network-diagnostics-server/CodegenIntegration.cpp
++++ b/src/app/clusters/thread-network-diagnostics-server/CodegenIntegration.cpp
+@@ -39,10 +39,12 @@ constexpr size_t kThreadNetworkDiagnosticsMaxClusterCount =
+ 
+ LazyRegisteredServerCluster<ThreadNetworkDiagnosticsCluster> gServers[kThreadNetworkDiagnosticsMaxClusterCount];
+ 
+-DirectThreadNetworkDiagnosticsProvider & GetDirectProvider()
++ThreadNetworkDiagnosticsProvider * gProviderOverride = nullptr;
++
++ThreadNetworkDiagnosticsProvider & GetDirectProvider()
+ {
+     static DirectThreadNetworkDiagnosticsProvider sDirectProvider;
+-    return sDirectProvider;
++    return gProviderOverride != nullptr ? *gProviderOverride : static_cast<ThreadNetworkDiagnosticsProvider &>(sDirectProvider);
+ }
+ 
+ class IntegrationDelegate : public CodegenClusterIntegration::Delegate
+@@ -79,6 +81,15 @@ public:
+ 
+ } // namespace
+ 
++namespace chip::app::Clusters::ThreadNetworkDiagnostics {
++
++void SetDefaultThreadNetworkDiagnosticsProvider(ThreadNetworkDiagnosticsProvider * provider)
++{
++    gProviderOverride = provider;
++}
++
++} // namespace chip::app::Clusters::ThreadNetworkDiagnostics
++
+ void MatterThreadNetworkDiagnosticsClusterInitCallback(EndpointId endpointId)
+ {
+     IntegrationDelegate integrationDelegate;
+diff --git a/src/app/clusters/thread-network-diagnostics-server/ThreadNetworkDiagnosticsProvider.h b/src/app/clusters/thread-network-diagnostics-server/ThreadNetworkDiagnosticsProvider.h
+index 619dce5e39..38c3153695 100644
+--- a/src/app/clusters/thread-network-diagnostics-server/ThreadNetworkDiagnosticsProvider.h
++++ b/src/app/clusters/thread-network-diagnostics-server/ThreadNetworkDiagnosticsProvider.h
+@@ -31,4 +31,10 @@ public:
+     virtual void ResetCounts()                                                                      = 0;
+ };
+ 
++// Overrides the provider used for codegen-integrated cluster instances,
++// for applications whose Thread state lives outside the in-process stack
++// (e.g. in an external border router daemon). Must be called before the
++// endpoints are initialized; passing nullptr restores the default.
++void SetDefaultThreadNetworkDiagnosticsProvider(ThreadNetworkDiagnosticsProvider * provider);
++
+ } // namespace chip::app::Clusters::ThreadNetworkDiagnostics
+diff --git a/src/app/clusters/thread-network-directory-server/CodegenIntegration.h b/src/app/clusters/thread-network-directory-server/CodegenIntegration.h
+index 329f3d5de3..020da46296 100644
+--- a/src/app/clusters/thread-network-directory-server/CodegenIntegration.h
++++ b/src/app/clusters/thread-network-directory-server/CodegenIntegration.h
+@@ -46,6 +46,10 @@ public:
+ 
+     CHIP_ERROR Init();
+ 
++    // Grants the application access to the underlying storage, e.g. to seed
++    // the directory with networks it knows about on its own.
++    ThreadNetworkDirectoryStorage & Storage() { return mStorage; }
++
+ private:
+     DefaultThreadNetworkDirectoryStorage mStorage;
+     RegisteredServerCluster<ThreadNetworkDirectoryCluster> mCluster;
+diff --git a/src/platform/Linux/ConnectivityUtils.cpp b/src/platform/Linux/ConnectivityUtils.cpp
+index 635b4ecfef..1f13d1775a 100644
+--- a/src/platform/Linux/ConnectivityUtils.cpp
++++ b/src/platform/Linux/ConnectivityUtils.cpp
+@@ -26,6 +26,7 @@
+ #include <arpa/inet.h>
+ #include <errno.h>
+ #include <ifaddrs.h>
++#include <net/if.h>
+ #include <linux/ethtool.h>
+ #include <linux/if_link.h>
+ #include <linux/sockios.h>
+@@ -613,6 +614,16 @@ CHIP_ERROR GetEthInterfaceName(char * ifname, size_t bufSize)
+     CHIP_ERROR err          = CHIP_ERROR_READ_FAILED;
+     struct ifaddrs * ifaddr = nullptr;
+ 
++    // On a multi-homed host the first ethtool-capable interface is not
++    // necessarily the one the node actually lives on; a router typically
++    // speaks through a bridge. Let the application name it.
++    const char * configured = getenv("CHIP_ETHERNET_INTERFACE");
++    if (configured != nullptr && if_nametoindex(configured) != 0)
++    {
++        Platform::CopyString(ifname, bufSize, configured);
++        return CHIP_NO_ERROR;
++    }
++
+     if (getifaddrs(&ifaddr) == -1)
+     {
+         ChipLogError(DeviceLayer, "Failed to get network interfaces");
+-- 
+2.55.0
+

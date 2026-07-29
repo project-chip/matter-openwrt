@@ -5,6 +5,11 @@
 			"methods": [
 				"*"
 			]
+		},
+		"network.wireless": {
+			"methods": [
+				"status"
+			]
 		}
 	},
 	"subscribe": [
