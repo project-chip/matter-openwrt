@@ -50,6 +50,7 @@ define Package/matter-netman/default
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
   DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter
+  PROVIDES:=matter-netman
   USERID:=matter:matter
 endef
 
@@ -79,7 +80,7 @@ endef
 define Package/matter-netman-mbedtls
   $(Package/matter-netman/default)
   TITLE+= (mbedtls)
-  DEPENDS+= +PACKAGE_matter-netman-mbedtls:libmbedtls
+  DEPENDS+= +PACKAGE_matter-netman-mbedtls:libmbedtls +@MBEDTLS_CCM_C
   VARIANT:=mbedtls
   DEFAULT_VARIANT:=1
 endef
@@ -87,8 +88,9 @@ endef
 define Package/matter-netman-mbedtls/description
 $(Package/matter-netman/default/description)
 
-This variant of the package uses the mbedTLS crypto library,
-which must have the MBEDTLS_CCM_C option enabled.
+This variant of the package uses the mbedTLS crypto library. It turns on
+that library's MBEDTLS_CCM_C option, which OpenWrt leaves off by default
+and which the AES-CCM cipher of the Matter message layer requires.
 endef
 
 define Package/matter-netman-openssl
