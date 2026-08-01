@@ -1,0 +1,107 @@
+From 6d01687c81cfd74b913426b701e54a0eff0c9e4b Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 1 Aug 2026 04:01:25 +0200
+Subject: [PATCH] [ubus] report the router table and the neighbour frame
+ counters
+
+The Matter Thread Network Diagnostics cluster needs a router table, which the
+neighbour list does not cover: a leader with a populated mesh has routers it
+is not a direct neighbour of. Add a routertable method, one entry per
+allocated router id, carrying exactly the fields otRouterInfo holds.
+
+The neighbour rows gain LinkFrameCounter and MleFrameCounter. Both are
+mandatory fields of the cluster's neighbour table and otNeighborInfo has had
+them all along.
+
+Assisted-By: Claude Opus 5
+---
+ src/openwrt/ubus/otubus.cpp | 46 +++++++++++++++++++++++++++++++++++++
+ src/openwrt/ubus/otubus.hpp |  1 +
+ 2 files changed, 47 insertions(+)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 21ee699c..6a85f676 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -363,6 +363,8 @@ int UbusServer::HandleNeighbor(ubus_request_data *aRequest)
+         blobmsg_add_string(&mBuf, "Mode", mode);
+         blobmsg_add_hex_string(&mBuf, "ExtAddress", neighborInfo.mExtAddress.m8, sizeof(neighborInfo.mExtAddress.m8));
+         blobmsg_add_u16(&mBuf, "LinkQualityIn", neighborInfo.mLinkQualityIn);
++        blobmsg_add_u32(&mBuf, "LinkFrameCounter", neighborInfo.mLinkFrameCounter);
++        blobmsg_add_u32(&mBuf, "MleFrameCounter", neighborInfo.mMleFrameCounter);
+ 
+         blobmsg_close_table(&mBuf, jsonTable);
+ 
+@@ -729,6 +731,49 @@ exit:
+     return 0;
+ }
+ 
++int UbusServer::HandleRouterTable(ubus_request_data *aRequest)
++{
++    otError error       = OT_ERROR_NONE;
++    uint8_t maxRouterId = otThreadGetMaxRouterId(mHost.GetInstance());
++    void   *jsonList    = nullptr;
++    void   *jsonTable   = nullptr;
++
++    jsonList = blobmsg_open_array(&mBuf, "router_list");
++
++    for (uint8_t routerId = 0; routerId <= maxRouterId; routerId++)
++    {
++        otRouterInfo routerInfo;
++
++        if (otThreadGetRouterInfo(mHost.GetInstance(), routerId, &routerInfo) != OT_ERROR_NONE)
++        {
++            continue;
++        }
++
++        jsonTable = blobmsg_open_table(&mBuf, nullptr);
++
++        blobmsg_add_hex_string(&mBuf, "ExtAddress", routerInfo.mExtAddress.m8, sizeof(routerInfo.mExtAddress.m8));
++        // Formatted rather than numeric, to match how neighbor, parent and
++        // rloc16 already report this field. The two tables are meant to be
++        // cross-referenced, and a client joining them on Rloc16 would find
++        // nothing if one side were a number and the other a string.
++        blobmsg_printf(&mBuf, "Rloc16", "0x%04x", routerInfo.mRloc16);
++        blobmsg_add_u16(&mBuf, "RouterId", routerInfo.mRouterId);
++        blobmsg_add_u16(&mBuf, "NextHop", routerInfo.mNextHop);
++        blobmsg_add_u16(&mBuf, "PathCost", routerInfo.mPathCost);
++        blobmsg_add_u16(&mBuf, "LinkQualityIn", routerInfo.mLinkQualityIn);
++        blobmsg_add_u16(&mBuf, "LinkQualityOut", routerInfo.mLinkQualityOut);
++        blobmsg_add_u16(&mBuf, "Age", routerInfo.mAge);
++        blobmsg_add_u8(&mBuf, "Allocated", routerInfo.mAllocated);
++        blobmsg_add_u8(&mBuf, "LinkEstablished", routerInfo.mLinkEstablished);
++
++        blobmsg_close_table(&mBuf, jsonTable);
++    }
++
++    blobmsg_close_array(&mBuf, jsonList);
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
++
+ int UbusServer::HandleNetworkData(ubus_request_data *aRequest)
+ {
+     ubus_send_reply(&mContext, aRequest, mNetworkdataBuf.head);
+@@ -1378,6 +1423,7 @@ const ubus_method UbusServer::sMethods[] = {
+     OTBR_UBUS_METHOD_NOARG("interfacename", &UbusServer::HandleInterfaceName),
+     OTBR_UBUS_METHOD_NOARG("leaderdata", &UbusServer::HandleLeaderData),
+     OTBR_UBUS_METHOD_NOARG("neighbor", &UbusServer::HandleNeighbor),
++    OTBR_UBUS_METHOD_NOARG("routertable", &UbusServer::HandleRouterTable),
+     OTBR_UBUS_METHOD_NOARG("networkdata", &UbusServer::HandleNetworkData),
+     OTBR_UBUS_METHOD_NOARG("parent", &UbusServer::HandleParent),
+     OTBR_UBUS_METHOD_NOARG("partitionid", &UbusServer::HandlePartitionId),
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index 4a3417cd..2941ec86 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -80,6 +80,7 @@ private:
+     int HandleRloc16(ubus_request_data *aRequest);
+     int HandleLeaderData(ubus_request_data *aRequest);
+     int HandleNeighbor(ubus_request_data *aRequest);
++    int HandleRouterTable(ubus_request_data *aRequest);
+     int HandleNetworkData(ubus_request_data *aRequest);
+     int HandleParent(ubus_request_data *aRequest);
+     int HandlePartitionId(ubus_request_data *aRequest);
+-- 
+2.55.0
+
