@@ -56,6 +56,24 @@ endef
 define Package/matter-netman/default/description
   Matter Network Infrastructure Manager Daemon
   Integrates a router / access point with the Matter IoT ecosystem.
+
+  This is an uncertified build. It identifies itself with the Connectivity
+  Standards Alliance test vendor id 0xFFF1 and product id 0x8013, and it
+  attests with the Matter SDK's development attestation certificate for that
+  pair.
+
+  That certificate is shared, not unique to this device: the same one ships
+  in every build of the example, and its private key is published in the SDK
+  source. Device attestation therefore cannot distinguish this router from
+  any other node presenting the same credential, and successful attestation
+  says nothing about who built the device or what software is running on it.
+  The certificate also chains to a development root rather than a production
+  one, so whether a controller accepts it silently, warns, or refuses depends
+  on which roots that controller trusts.
+
+  The manufacturer and product names reported in Basic Information are read
+  from the firmware and describe who built it. They are accurate, and they
+  are not backed by any Matter certification.
 endef
 
 define Package/matter-netman-mbedtls
