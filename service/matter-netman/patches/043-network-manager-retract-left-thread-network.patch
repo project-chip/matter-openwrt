@@ -1,0 +1,274 @@
+From 826932e30058bccc758b2682f34f818bf99ee44c Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 1 Aug 2026 10:30:13 +0200
+Subject: [PATCH] [network-manager] retract the Thread network the border
+ router has left
+
+The directory kept every network this node had ever been on. An entry is a
+whole operational dataset, network key included, readable by any commissioned
+fabric; Thread Border Router Management only returns the current one, so a
+superseded network's key was reachable through the directory and nowhere else.
+On a router that offers credential rotation that is a key the operator believes
+they have replaced.
+
+The entry this node seeded is now retracted when it is superseded and when otbr
+reports no network at all, and only that entry: what a controller added is left
+alone. The id is persisted, because a migration finishing while the daemon is
+down would otherwise leave the old network listed with nothing left that knows
+it was ours to remove. Retraction happens before the replacement is recorded,
+since the table has a fixed capacity and adding first would be refused on a
+full one.
+
+The delegate also suppressed the empty active dataset, in both the notification
+and the replay path, so a deprovision never reached the application. It now
+distinguishes "otbr says there is no network" from "otbr has not said anything
+yet", and losing otbr-agent returns the dataset to unknown rather than
+reporting it as gone.
+
+Assisted-By: Claude Opus 5
+---
+ .../linux/ThreadBROpenThreadUbus.cpp          |  20 ++-
+ .../linux/ThreadBROpenThreadUbus.h            |  14 +-
+ examples/network-manager-app/linux/main.cpp   | 124 ++++++++++++++++--
+ 3 files changed, 142 insertions(+), 16 deletions(-)
+
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+index cbe0a03e77..97ac76ca7b 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+@@ -69,6 +69,7 @@ void OpenThreadUbusBorderRouterDelegate::OnOtbrLost()
+     // one reading nothing.
+     mBorderAgentIDValid = false;
+     mInterfaceEnabled   = false;
++    mActiveDatasetKnown = false;
+     mActiveDataset.Clear();
+     mPendingDataset.Clear();
+ 
+@@ -333,17 +334,30 @@ void OpenThreadUbusBorderRouterDelegate::OnDataReceived(blob_attr * msg, bool no
+ 
+     if (activeDataset.has_value())
+     {
++        // An empty payload is otbr saying there is no network — after a
++        // deprovision, or before the first one. That is as much a statement
++        // about the active dataset as a populated one, and the observer needs
++        // it: a network this node has left is one it cannot let anyone join.
+         Thread::OperationalDatasetView dataset;
+-        if (dataset.Init(activeDataset.value()) == CHIP_NO_ERROR)
++        const bool empty = activeDataset->empty();
++        if (empty || dataset.Init(activeDataset.value()) == CHIP_NO_ERROR)
+         {
+             ChipLogProgress(AppServer, "Received OTBR ActiveDataset (size = %lu)",
+                             static_cast<unsigned long>(activeDataset->size()));
+-            mActiveDataset = dataset;
++            if (empty)
++            {
++                mActiveDataset.Clear();
++            }
++            else
++            {
++                mActiveDataset = dataset;
++            }
++            mActiveDatasetKnown = true;
+             if (notification)
+             {
+                 mAttributeChangeCallback->ReportAttributeChanged(ActiveDatasetTimestamp::Id);
+             }
+-            if (mDatasetObserver != nullptr && !mActiveDataset.IsEmpty())
++            if (mDatasetObserver != nullptr)
+             {
+                 mDatasetObserver(mDatasetObserverContext, mActiveDataset);
+             }
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+index 199ac585e6..23729f9db1 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+@@ -33,14 +33,16 @@ public:
+ 
+     CHIP_ERROR Init(AttributeChangeCallback * attributeChangeCallback) override;
+ 
+-    // Called whenever a (non-empty) active dataset is received from otbr,
+-    // both for the initial snapshot and for later changes. A snapshot that
+-    // arrived before the observer was set is replayed immediately.
++    // Called whenever otbr states the active dataset, both for the initial
++    // snapshot and for later changes, and including the empty dataset that
++    // means the node is no longer on a network. A snapshot that arrived
++    // before the observer was set is replayed immediately; nothing is
++    // reported before otbr has said anything at all.
+     void SetActiveDatasetObserver(ActiveDatasetObserver observer, void * context)
+     {
+         mDatasetObserver        = observer;
+         mDatasetObserverContext = context;
+-        if (observer != nullptr && !mActiveDataset.IsEmpty())
++        if (observer != nullptr && mActiveDatasetKnown)
+         {
+             observer(context, mActiveDataset);
+         }
+@@ -94,6 +96,10 @@ private:
+     // Thread version code as otbr reports it; 0 until it has been asked.
+     uint16_t mThreadVersion = 0;
+ 
++    // Whether otbr has stated the active dataset at all. An empty dataset is
++    // a statement ("no network"); never having heard one is not.
++    bool mActiveDatasetKnown = false;
++
+     Thread::OperationalDataset mActiveDataset;
+     Thread::OperationalDataset mPendingDataset;
+     ActivateDatasetCallback * mActivateDatasetCallback = nullptr;
+diff --git a/examples/network-manager-app/linux/main.cpp b/examples/network-manager-app/linux/main.cpp
+index c4ec45e0e8..5947ec3e64 100644
+--- a/examples/network-manager-app/linux/main.cpp
++++ b/examples/network-manager-app/linux/main.cpp
+@@ -236,20 +236,121 @@ static void ApplicationEarlyInit()
+ }
+ 
+ #if MATTER_ENABLE_UBUS
+-// Records the border router's own network in the Thread Network Directory,
+-// so the directory answers with the network of the home it lives in even
+-// before any controller has populated it. A dataset change (e.g. a PAN
+-// migration) updates the entry; past networks deliberately stay listed.
++// The Extended PAN ID of the entry this node put in the directory itself, as
++// opposed to one a controller added. Persisted, because the entry is: a
++// migration that completes while the daemon is down would otherwise leave the
++// superseded network — and its network key — in the directory with nothing
++// left that knows it was ours to remove.
++constexpr char kSeededNetworkKey[] = "nim/seeded-ext-pan-id";
++
++std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> LoadSeededNetwork()
++{
++    ThreadNetworkDirectoryStorage::ExtendedPanId id;
++    uint16_t size = sizeof(id.bytes);
++    VerifyOrReturnValue(Server::GetInstance().GetPersistentStorage().SyncGetKeyValue(kSeededNetworkKey, id.bytes, size) ==
++                                CHIP_NO_ERROR &&
++                            size == sizeof(id.bytes),
++                        std::nullopt);
++    return id;
++}
++
++void StoreSeededNetwork(const std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> & id)
++{
++    auto & storage = Server::GetInstance().GetPersistentStorage();
++    CHIP_ERROR err = id.has_value()
++        ? storage.SyncSetKeyValue(kSeededNetworkKey, id->bytes, static_cast<uint16_t>(sizeof(id->bytes)))
++        : storage.SyncDeleteKeyValue(kSeededNetworkKey);
++    if (err != CHIP_NO_ERROR && err != CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND)
++    {
++        ChipLogError(AppServer, "Recording the seeded Thread network failed: %" CHIP_ERROR_FORMAT, err.Format());
++    }
++}
++
++// Records the border router's own network in the Thread Network Directory, so
++// the directory answers with the network of the home it lives in even before
++// any controller has populated it.
++//
++// An empty dataset means there is no network any more — deprovisioned, or the
++// border router gone — and a network the node has left is one it can no longer
++// let anyone join. The entry goes, and with it the credentials it carries. The
++// same applies to the network we were on before a migration to a different
++// Extended PAN ID: it is retracted rather than left listed. Only the entry this
++// node seeded is ever retracted; what a controller added is left alone.
+ void SeedThreadNetworkDirectory(void * context, const Thread::OperationalDataset & dataset)
+ {
+-    ByteSpan extPanId;
+     VerifyOrReturn(gThreadNetworkDirectoryServer.has_value());
+-    VerifyOrReturn(dataset.GetExtendedPanIdAsByteSpan(extPanId) == CHIP_NO_ERROR);
+-    CHIP_ERROR err = gThreadNetworkDirectoryServer->Storage().AddOrUpdateNetwork(
+-        ThreadNetworkDirectoryStorage::ExtendedPanId(extPanId), dataset.AsByteSpan());
++
++    std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> seeded = LoadSeededNetwork();
++
++    ByteSpan extPanId;
++    if (dataset.IsEmpty() || dataset.GetExtendedPanIdAsByteSpan(extPanId) != CHIP_NO_ERROR)
++    {
++        if (seeded.has_value())
++        {
++            CHIP_ERROR err = gThreadNetworkDirectoryServer->ForgetNetwork(*seeded);
++            if (err != CHIP_NO_ERROR && err != CHIP_ERROR_NOT_FOUND)
++            {
++                ChipLogError(AppServer, "Retracting the Thread network failed: %" CHIP_ERROR_FORMAT, err.Format());
++                return;
++            }
++            StoreSeededNetwork(std::nullopt);
++        }
++        return;
++    }
++
++    const ThreadNetworkDirectoryStorage::ExtendedPanId current(extPanId);
++
++    // Retract before recording, not after: the table has a fixed capacity, and
++    // adding first would be refused on a full one, leaving the superseded entry
++    // behind for good.
++    bool preferSuccessor = false;
++    if (seeded.has_value() && !(*seeded == current))
++    {
++        // A preference naming the network being retracted is cleared by
++        // ForgetNetwork, since a preference must always name a listed network.
++        // Note it now so it can follow to the replacement once that is listed.
++        std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> preferred;
++        preferSuccessor = gThreadNetworkDirectoryServer->GetPreferredNetwork(preferred) == CHIP_NO_ERROR && preferred.has_value() &&
++            preferred.value() == *seeded;
++
++        CHIP_ERROR err = gThreadNetworkDirectoryServer->ForgetNetwork(*seeded);
++        if (err != CHIP_NO_ERROR && err != CHIP_ERROR_NOT_FOUND)
++        {
++            ChipLogError(AppServer, "Retracting the superseded Thread network failed: %" CHIP_ERROR_FORMAT, err.Format());
++            preferSuccessor = false;
++        }
++    }
++
++    // otbr states the dataset again on every reconnect, byte for byte the same.
++    // Recording it again would wake every subscriber to ThreadNetworks for no
++    // change, so only an actual difference is written.
++    uint8_t stored[Thread::kSizeOperationalDataset];
++    MutableByteSpan storedSpan(stored);
++    if (gThreadNetworkDirectoryServer->Storage().GetNetworkDataset(current, storedSpan) == CHIP_NO_ERROR &&
++        storedSpan.data_equal(dataset.AsByteSpan()))
++    {
++        return;
++    }
++
++    CHIP_ERROR err = gThreadNetworkDirectoryServer->AddOrUpdateNetwork(current, dataset.AsByteSpan());
+     if (err != CHIP_NO_ERROR)
+     {
+         ChipLogError(AppServer, "Seeding the Thread Network Directory failed: %" CHIP_ERROR_FORMAT, err.Format());
++        return;
++    }
++    if (!seeded.has_value() || !(*seeded == current))
++    {
++        StoreSeededNetwork(current);
++    }
++
++    // Now that the replacement is listed, the preference can point at it.
++    if (preferSuccessor)
++    {
++        CHIP_ERROR preferErr = gThreadNetworkDirectoryServer->SetPreferredNetwork(&current);
++        if (preferErr != CHIP_NO_ERROR)
++        {
++            ChipLogError(AppServer, "Moving the preferred Thread network failed: %" CHIP_ERROR_FORMAT, preferErr.Format());
++        }
+     }
+ }
+ #endif
+@@ -277,7 +378,9 @@ void ClearThreadNetworkDirectory()
+ 
+     for (size_t i = 0; i < count; i++)
+     {
+-        CHIP_ERROR err = storage.RemoveNetwork(ids[i]);
++        // Through the cluster, so subscribers are told and a preference that
++        // named one of these is cleared rather than left dangling.
++        CHIP_ERROR err = gThreadNetworkDirectoryServer->ForgetNetwork(ids[i]);
+         if (err != CHIP_NO_ERROR)
+         {
+             ChipLogError(AppServer, "Clearing the Thread Network Directory failed: %" CHIP_ERROR_FORMAT, err.Format());
+@@ -287,6 +390,9 @@ void ClearThreadNetworkDirectory()
+     {
+         ChipLogProgress(AppServer, "Cleared %u Thread network(s) from the directory", static_cast<unsigned>(count));
+     }
++#if MATTER_ENABLE_UBUS
++    StoreSeededNetwork(std::nullopt);
++#endif
+ }
+ 
+ void ApplicationInit()
+-- 
+2.55.0
+
