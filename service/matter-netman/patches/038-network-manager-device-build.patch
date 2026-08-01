@@ -1,0 +1,65 @@
+From acd687a893bb181902244cb7b3e4dd2240ac1a8c Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 1 Aug 2026 04:00:27 +0200
+Subject: [PATCH] [network-manager] build this example as the device it ships
+ on
+
+config/standalone turns CONFIG_BUILD_FOR_HOST_UNIT_TEST on for every
+standalone build, reasoning that standalone means a host rather than a
+device. This one runs on routers. Among other things the switch drops the
+range check in Encode() for Nullable<>, so a value in the reserved band would
+go out on the wire where the specification requires CONSTRAINT_ERROR.
+
+Take the device behaviour, and with it keep the passcode out of the system
+log: the operator reads the pairing code from the administration interface,
+which the matter ubus object serves from its status method.
+
+Also list the two headers that were missing from the ubus sources.
+
+Assisted-By: Claude Opus 5
+---
+ examples/network-manager-app/linux/BUILD.gn         |  2 ++
+ .../linux/include/CHIPProjectAppConfig.h            | 13 +++++++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/examples/network-manager-app/linux/BUILD.gn b/examples/network-manager-app/linux/BUILD.gn
+index 5d854c9dc7..1b7870b366 100644
+--- a/examples/network-manager-app/linux/BUILD.gn
++++ b/examples/network-manager-app/linux/BUILD.gn
+@@ -41,7 +41,9 @@ executable("matter-network-manager-app") {
+     sources += [
+       "MatterUbusService.cpp",
+       "NimDiagnostics.cpp",
++      "NimDiagnostics.h",
+       "NimInstanceInfo.cpp",
++      "NimInstanceInfo.h",
+       "MatterUbusService.h",
+       "ThreadBROpenThreadUbus.cpp",
+       "ThreadBROpenThreadUbus.h",
+diff --git a/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h b/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
+index fb2ed7e32a..ea4ced6260 100644
+--- a/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
++++ b/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
+@@ -29,6 +29,19 @@
+ // Sufficient space for ArlReviewEvent of several fabrics.
+ #define CHIP_DEVICE_CONFIG_EVENT_LOGGING_INFO_BUFFER_SIZE (32 * 1024)
+ 
++// The passcode is generated once and kept for the life of the device, and the
++// system log outlives commissioning by a long way. The operator reads the code
++// from the administration interface instead, which the matter ubus object
++// serves from its status method.
++#define CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD 0
++
++// config/standalone turns this on for every standalone build, on the reasoning
++// that standalone means a host and not a device. This one runs on a router, so
++// take the device behaviour: among other things the flag drops the range check
++// in Encode() for Nullable<>, which would let an out-of-range value go out on
++// the wire where the specification requires CONSTRAINT_ERROR.
++#define CONFIG_BUILD_FOR_HOST_UNIT_TEST 0
++
+ #ifndef MATTER_ENABLE_UBUS
+ #define MATTER_ENABLE_UBUS 0
+ #endif
+-- 
+2.55.0
+

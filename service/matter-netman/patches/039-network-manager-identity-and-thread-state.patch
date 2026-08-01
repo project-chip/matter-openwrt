@@ -1,0 +1,336 @@
+From 4dd8f89dd8a65d4cc44ac35437b5105d05fdf515 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 1 Aug 2026 04:00:27 +0200
+Subject: [PATCH] [network-manager] report the identity and Thread state the
+ router has
+
+Four things the node stated without knowing them.
+
+ProductName came from a compile time default, which reads as an empty string
+in a build that does not set one. Serve it the way the vendor name is already
+served: from the distribution name in /etc/os-release, with --product-name to
+override. The board the firmware runs on stays separate, as the hardware
+version.
+
+BorderRouterName was the literal "OpenThread BorderRouter" on every unit,
+which makes a mesh with more than one border router unreadable. Use the host
+name, which is what the administrator chose and what otbr already advertises
+this router as over mDNS.
+
+ThreadVersion was hardcoded to 5. otbr answers it on its version method, so
+ask once when otbr appears.
+
+InterfaceEnabled reported "a dataset is configured", which stays true after
+threadstop. otbr reports the disabled role for a stopped interface, so track
+that instead.
+
+And when otbr-agent goes away, drop what was cached from it rather than keep
+reporting a border agent id, a dataset and an interface that nothing is
+serving any more. An activation still waiting on a provision reply is
+completed as not connected rather than left hanging.
+
+CHIP_ETHERNET_INTERFACE is now overwritten rather than defaulted: the
+diagnostics this node reports are taken from the primary interface, and an
+interface inherited from the environment made the platform describe a
+different one.
+
+Assisted-By: Claude Opus 5
+---
+ .../linux/NimInstanceInfo.cpp                 | 14 +++-
+ .../linux/NimInstanceInfo.h                   |  4 +
+ .../linux/ThreadBROpenThreadUbus.cpp          | 74 ++++++++++++++++++-
+ .../linux/ThreadBROpenThreadUbus.h            | 13 ++++
+ examples/network-manager-app/linux/main.cpp   | 26 +++++--
+ 5 files changed, 117 insertions(+), 14 deletions(-)
+
+diff --git a/examples/network-manager-app/linux/NimInstanceInfo.cpp b/examples/network-manager-app/linux/NimInstanceInfo.cpp
+index b93c46a386..cb6933707b 100644
+--- a/examples/network-manager-app/linux/NimInstanceInfo.cpp
++++ b/examples/network-manager-app/linux/NimInstanceInfo.cpp
+@@ -75,6 +75,13 @@ void NimInstanceInfoProvider::Init()
+     {
+         mVendorName = OsReleaseField("OPENWRT_DEVICE_MANUFACTURER");
+     }
++    // The product this daemon is part of is the firmware distribution, which
++    // is what a controller can meaningfully name: "OpenWrt", "TurrisOS". The
++    // board it runs on is reported separately as the hardware version.
++    if (mProductName.empty())
++    {
++        mProductName = OsReleaseField("NAME");
++    }
+     mProductUrl = OsReleaseField("OPENWRT_DEVICE_MANUFACTURER_URL");
+ 
+     // The device the firmware runs on, with its revision when the firmware
+@@ -103,9 +110,8 @@ void NimInstanceInfoProvider::Init()
+     DeviceLayer::SetDeviceInstanceInfoProvider(this);
+ }
+ 
+-CHIP_ERROR NimInstanceInfoProvider::CopyOrDelegate(
+-    const std::string & value, char * buf, size_t bufSize,
+-    CHIP_ERROR (DeviceLayer::DeviceInstanceInfoProvider::*fallback)(char *, size_t))
++CHIP_ERROR NimInstanceInfoProvider::CopyOrDelegate(const std::string & value, char * buf, size_t bufSize,
++                                                   CHIP_ERROR (DeviceLayer::DeviceInstanceInfoProvider::*fallback)(char *, size_t))
+ {
+     if (!value.empty())
+     {
+@@ -139,7 +145,7 @@ CHIP_ERROR NimInstanceInfoProvider::GetVendorId(uint16_t & vendorId)
+ 
+ CHIP_ERROR NimInstanceInfoProvider::GetProductName(char * buf, size_t bufSize)
+ {
+-    return mFallback->GetProductName(buf, bufSize);
++    return CopyOrDelegate(mProductName, buf, bufSize, &DeviceLayer::DeviceInstanceInfoProvider::GetProductName);
+ }
+ 
+ CHIP_ERROR NimInstanceInfoProvider::GetProductId(uint16_t & productId)
+diff --git a/examples/network-manager-app/linux/NimInstanceInfo.h b/examples/network-manager-app/linux/NimInstanceInfo.h
+index d4c907cd76..dcdd06f9e8 100644
+--- a/examples/network-manager-app/linux/NimInstanceInfo.h
++++ b/examples/network-manager-app/linux/NimInstanceInfo.h
+@@ -40,6 +40,9 @@ public:
+     // Overrides the firmware's manufacturer string (uci option).
+     void SetVendorName(const char * name) { mVendorName = name; }
+ 
++    // Overrides the firmware's distribution name (uci option).
++    void SetProductName(const char * name) { mProductName = name; }
++
+     CHIP_ERROR GetVendorName(char * buf, size_t bufSize) override;
+     CHIP_ERROR GetVendorId(uint16_t & vendorId) override;
+     CHIP_ERROR GetProductName(char * buf, size_t bufSize) override;
+@@ -59,6 +62,7 @@ private:
+ 
+     DeviceLayer::DeviceInstanceInfoProvider * mFallback = nullptr;
+     std::string mVendorName;
++    std::string mProductName;
+     std::string mProductUrl;
+     std::string mHardware;
+ };
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+index f5ae5a61f9..cbe0a03e77 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+@@ -27,6 +27,8 @@
+ 
+ #include <libubus.h>
+ #include <optional>
++#include <string.h>
++#include <unistd.h>
+ 
+ using namespace chip::ubus;
+ using namespace chip::app::Clusters::ThreadBorderRouterManagement::Attributes;
+@@ -46,16 +48,70 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::Init(AttributeChangeCallback * at
+                         static_cast<decltype(this)>(req->priv)->OnDataReceived(msg, false);
+                     }),
+                     self, kInvokeTimeout);
++        self->FetchThreadVersion();
+     });
+     mOtbr.SetNotificationCallback([](UbusWatch & watch, void * appState, ubus_request_data * req, const char * notification,
+                                      blob_attr * msg) { static_cast<decltype(this)>(appState)->OnDataReceived(msg, true); });
++    mOtbr.SetLostCallback([](UbusWatch & watch, void * appState) { static_cast<decltype(this)>(appState)->OnOtbrLost(); });
+     mUbusManager.Register(mOtbr);
+ 
+     return CHIP_NO_ERROR;
+ }
+ 
++void OpenThreadUbusBorderRouterDelegate::OnOtbrLost()
++{
++    const bool hadActive  = !mActiveDataset.IsEmpty();
++    const bool hadPending = !mPendingDataset.IsEmpty();
++
++    // The border agent id, the datasets and the interface state were all read
++    // from otbr. With it gone none of them can be confirmed, and a controller
++    // reading a network that is no longer being served is worse served than
++    // one reading nothing.
++    mBorderAgentIDValid = false;
++    mInterfaceEnabled   = false;
++    mActiveDataset.Clear();
++    mPendingDataset.Clear();
++
++    if (hadActive)
++    {
++        mAttributeChangeCallback->ReportAttributeChanged(ActiveDatasetTimestamp::Id);
++    }
++    if (hadPending)
++    {
++        mAttributeChangeCallback->ReportAttributeChanged(PendingDatasetTimestamp::Id);
++    }
++
++    // An activation waiting on a provision reply will never get one.
++    if (auto * callback = mActivateDatasetCallback)
++    {
++        mActivateDatasetCallback = nullptr;
++        mActivationPending       = false;
++        callback->OnActivateDatasetComplete(mActivateDatasetSequence, CHIP_ERROR_NOT_CONNECTED);
++    }
++}
++
++void OpenThreadUbusBorderRouterDelegate::FetchThreadVersion()
++{
++    VerifyOrReturn(mOtbr.Resolved());
++    ubus_invoke(&mUbusManager.Context(), mOtbr.ObjectID(), "version", nullptr, ([](ubus_request * req, int type, blob_attr * msg) {
++        BlobMsgField<uint16_t, CHIP_CTST("ThreadVersionCode")> version;
++        VerifyOrReturn(BlobMsgParse(msg, version) && version.has_value());
++        *static_cast<uint16_t *>(req->priv) = version.value();
++    }),
++                &mThreadVersion, kInvokeTimeout);
++}
++
+ void OpenThreadUbusBorderRouterDelegate::GetBorderRouterName(MutableCharSpan & borderRouterName)
+ {
++    // Every unit reporting the same literal makes a mesh with more than one
++    // border router unreadable. The host name is what the administrator chose
++    // and what otbr already advertises this router as over mDNS.
++    char hostName[app::Clusters::ThreadBorderRouterManagement::kBorderRouterNameMaxLength + 1] = {};
++    if (gethostname(hostName, sizeof(hostName) - 1) == 0 && hostName[0] != '\0')
++    {
++        CopyCharSpanToMutableCharSpanWithTruncation(CharSpan::fromCharString(hostName), borderRouterName);
++        return;
++    }
+     CopyCharSpanToMutableCharSpanWithTruncation("OpenThread BorderRouter"_span, borderRouterName);
+ }
+ 
+@@ -66,12 +122,15 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::GetBorderAgentId(MutableByteSpan
+ 
+ uint16_t OpenThreadUbusBorderRouterDelegate::GetThreadVersion()
+ {
+-    return /* Thread 1.4.0 */ 5;
++    // Asked of otbr when it appeared. The attribute is mandatory and has no
++    // null, so before the first answer say Thread 1.4, which is the oldest
++    // version whose border router carries the ubus API this delegate needs.
++    return mThreadVersion != 0 ? mThreadVersion : /* Thread 1.4.0 */ 5;
+ }
+ 
+ bool OpenThreadUbusBorderRouterDelegate::GetInterfaceEnabled()
+ {
+-    return !mActiveDataset.IsEmpty();
++    return mInterfaceEnabled;
+ }
+ 
+ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::GetDataset(Thread::OperationalDataset & dataset, DatasetType type)
+@@ -254,7 +313,16 @@ void OpenThreadUbusBorderRouterDelegate::OnDataReceived(blob_attr * msg, bool no
+     BlobMsgField<ByteSpan, CHIP_CTST("ActiveDataset")> activeDataset;
+     BlobMsgField<ByteSpan, CHIP_CTST("PendingDataset")> pendingDataset;
+     BlobMsgField<bool, CHIP_CTST("Attached")> attached;
+-    BlobMsgParse(msg, borderAgentID, attached, activeDataset, pendingDataset);
++    BlobMsgField<const char *, CHIP_CTST("DeviceRole")> deviceRole;
++    BlobMsgParse(msg, borderAgentID, attached, activeDataset, pendingDataset, deviceRole);
++
++    if (deviceRole.has_value())
++    {
++        // The role otbr reports for a stopped interface. A configured dataset
++        // says nothing about whether the radio is running: threadstop leaves
++        // the dataset in place.
++        mInterfaceEnabled = (strcmp(deviceRole.value(), "disabled") != 0);
++    }
+ 
+     if (!mBorderAgentIDValid && borderAgentID.has_value() && borderAgentID->size() == sizeof(mBorderAgentID))
+     {
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+index 2f655242f6..199ac585e6 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+@@ -67,6 +67,12 @@ public:
+ 
+ private:
+     void OnDataReceived(blob_attr * msg, bool notification);
++    // otbr-agent went away: nothing cached from it describes the present any
++    // more, so it is dropped rather than kept being reported as current.
++    void OnOtbrLost();
++    // Reads the Thread version otbr was built against. Asked once, when otbr
++    // appears; the answer cannot change while it is running.
++    void FetchThreadVersion();
+ 
+     // Invokes an otbr method that takes a hex encoded dataset argument.
+     CHIP_ERROR InvokeWithDataset(const char * method, const Thread::OperationalDataset & dataset);
+@@ -81,6 +87,13 @@ private:
+     bool mBorderAgentIDValid = false;
+     uint8_t mBorderAgentID[app::Clusters::ThreadBorderRouterManagement::kBorderAgentIdLength];
+ 
++    // The IEEE 802.15.4 interface is up unless otbr reports the disabled
++    // role, which is what threadstop leaves behind. Without otbr there is no
++    // interface to speak of.
++    bool mInterfaceEnabled = false;
++    // Thread version code as otbr reports it; 0 until it has been asked.
++    uint16_t mThreadVersion = 0;
++
+     Thread::OperationalDataset mActiveDataset;
+     Thread::OperationalDataset mPendingDataset;
+     ActivateDatasetCallback * mActivateDatasetCallback = nullptr;
+diff --git a/examples/network-manager-app/linux/main.cpp b/examples/network-manager-app/linux/main.cpp
+index e7170d0f88..c4ec45e0e8 100644
+--- a/examples/network-manager-app/linux/main.cpp
++++ b/examples/network-manager-app/linux/main.cpp
+@@ -67,14 +67,15 @@ bool gThreadManaged            = true;
+ // and the identity the ethernet layers pick on this multi-homed host.
+ const char * gPrimaryInterface = "br-lan";
+ 
+-constexpr uint16_t kOptionWifiNetwork = 0x1001;
+-constexpr uint16_t kOptionWifiIface   = 0x1002;
+-constexpr uint16_t kOptionNoWifiShare = 0x1003;
+-constexpr uint16_t kOptionNoThread    = 0x1004;
++constexpr uint16_t kOptionWifiNetwork  = 0x1001;
++constexpr uint16_t kOptionWifiIface    = 0x1002;
++constexpr uint16_t kOptionNoWifiShare  = 0x1003;
++constexpr uint16_t kOptionNoThread     = 0x1004;
+ constexpr uint16_t kOptionPrimaryIface = 0x1005;
+ constexpr uint16_t kOptionVendorName   = 0x1006;
+ constexpr uint16_t kOptionDiagIface    = 0x1007;
+ constexpr uint16_t kOptionNoEthDiag    = 0x1008;
++constexpr uint16_t kOptionProductName  = 0x1009;
+ 
+ bool HandleAppOption(const char * program, ArgParser::OptionSet * options, int identifier, const char * name, const char * value)
+ {
+@@ -100,6 +101,9 @@ bool HandleAppOption(const char * program, ArgParser::OptionSet * options, int i
+     case kOptionVendorName:
+         NimInstanceInfoProvider::Instance().SetVendorName(value);
+         return true;
++    case kOptionProductName:
++        NimInstanceInfoProvider::Instance().SetProductName(value);
++        return true;
+     case kOptionDiagIface:
+         NimDiagnosticsProvider::Instance().SetDiagnosticsInterface(value);
+         return true;
+@@ -118,6 +122,7 @@ ArgParser::OptionDef sAppOptionDefs[] = {
+     { "no-thread", ArgParser::kNoArgument, kOptionNoThread },
+     { "primary-interface", ArgParser::kArgumentRequired, kOptionPrimaryIface },
+     { "vendor-name", ArgParser::kArgumentRequired, kOptionVendorName },
++    { "product-name", ArgParser::kArgumentRequired, kOptionProductName },
+     { "diagnostics-interface", ArgParser::kArgumentRequired, kOptionDiagIface },
+     { "no-ethernet-diagnostics", ArgParser::kNoArgument, kOptionNoEthDiag },
+     {},
+@@ -139,6 +144,9 @@ const char sAppOptionHelp[] = "  --wifi-network <name>\n"
+                               "  --vendor-name <name>\n"
+                               "       Manufacturer reported in Basic Information, overriding the\n"
+                               "       one the firmware states in /etc/os-release.\n"
++                              "  --product-name <name>\n"
++                              "       Product reported in Basic Information, overriding the\n"
++                              "       distribution name from /etc/os-release.\n"
+                               "  --diagnostics-interface <name>\n"
+                               "       Feed the Ethernet diagnostics from this interface instead of\n"
+                               "       the primary one.\n"
+@@ -211,6 +219,7 @@ static void ApplicationEarlyInit()
+ {
+ #if MATTER_ENABLE_UBUS
+     NimDiagnosticsProvider::Instance().SetPrimaryInterface(gPrimaryInterface);
++    NimDiagnosticsProvider::Instance().Init();
+     DeviceLayer::SetDiagnosticDataProvider(&NimDiagnosticsProvider::Instance());
+     NimInstanceInfoProvider::Instance().Init();
+ #endif
+@@ -338,9 +347,12 @@ void ApplicationShutdown()
+ int main(int argc, char * argv[])
+ {
+ #if MATTER_ENABLE_UBUS
+-    // Must be in place before the stack caches its ethernet interface;
+-    // --primary-interface overrides it during argument parsing.
+-    setenv("CHIP_ETHERNET_INTERFACE", gPrimaryInterface, 0);
++    // Must be in place before the stack caches its ethernet interface.
++    // Overwritten rather than defaulted: the diagnostics this node reports
++    // are taken from gPrimaryInterface, and an interface inherited from the
++    // environment would make the platform describe a different one.
++    // --primary-interface sets both, during argument parsing.
++    setenv("CHIP_ETHERNET_INTERFACE", gPrimaryInterface, 1);
+     VerifyOrReturnValue(ChipLinuxAppInit(argc, argv, &sAppOptions) == 0, -1);
+ #else
+     VerifyOrReturnValue(ChipLinuxAppInit(argc, argv) == 0, -1);
+-- 
+2.55.0
+

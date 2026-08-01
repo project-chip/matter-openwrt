@@ -1,0 +1,125 @@
+From 6382845c0fccd19b8a559d6aa9f4cc6610ed5151 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 1 Aug 2026 04:00:14 +0200
+Subject: [PATCH] [platform] let a product keep the setup passcode out of the
+ log
+
+Every standalone Linux example logs the setup passcode twice at start: once
+as "Setup Pin Code" from LogDeviceConfig, and once inside the manual pairing
+code and QR payload that PrintOnboardingCodes emits. That is the right
+default for a development board, where the log is the only place to read the
+code from. It is the wrong default for a product that has a display, a label
+or an administration interface, and whose system log outlives commissioning
+by years.
+
+Add CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD, on by default, and guard both
+sites with it. Nothing changes for any existing build.
+
+Assisted-By: Claude Opus 5
+---
+ examples/platform/linux/AppMain.cpp           | 10 +++++++---
+ src/include/platform/CHIPDeviceConfig.h       | 20 ++++++++++++++++---
+ .../GenericConfigurationManagerImpl.ipp       |  2 ++
+ 3 files changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/examples/platform/linux/AppMain.cpp b/examples/platform/linux/AppMain.cpp
+index 5547628806..57cc8f475a 100644
+--- a/examples/platform/linux/AppMain.cpp
++++ b/examples/platform/linux/AppMain.cpp
+@@ -670,10 +670,12 @@ int ChipLinuxAppInit(int argc, char * const argv[], OptionSet * customOptions,
+ 
+     ConfigurationMgr().LogDeviceConfig();
+ 
++#if CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
+     {
+         ChipLogProgress(NotSpecified, "==== Onboarding payload for Standard Commissioning Flow ====");
+         PrintOnboardingCodes(LinuxDeviceOptions::GetInstance().payload);
+     }
++#endif // CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
+ 
+ #if defined(PW_RPC_ENABLED)
+     rpc::Init(LinuxDeviceOptions::GetInstance().rpcServerPort);
+@@ -1028,7 +1030,9 @@ void ChipLinuxAppMainLoop(chip::ServerInitParams & initParams, AppMainLoopImplem
+     // noise.
+     ConfigurationMgr().LogDeviceConfig();
+ 
++#if CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
+     PrintOnboardingCodes(LinuxDeviceOptions::GetInstance().payload);
++#endif // CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
+ 
+ #if CHIP_DEVICE_CONFIG_ENABLE_BOTH_COMMISSIONER_AND_COMMISSIONEE
+ #if CHIP_LINUX_APP_START_COMMISSIONER_AT_BOOT
+@@ -1068,9 +1072,9 @@ void ChipLinuxAppMainLoop(chip::ServerInitParams & initParams, AppMainLoopImplem
+     // NOLINTEND(bugprone-signal-handler)
+ #endif
+ #else
+-    struct sigaction sa                        = {};
+-    sa.sa_handler                              = StopSignalHandler;
+-    sa.sa_flags                                = SA_RESETHAND;
++    struct sigaction sa = {};
++    sa.sa_handler       = StopSignalHandler;
++    sa.sa_flags         = SA_RESETHAND;
+     sigaction(SIGINT, &sa, nullptr);
+     sigaction(SIGTERM, &sa, nullptr);
+ #endif
+diff --git a/src/include/platform/CHIPDeviceConfig.h b/src/include/platform/CHIPDeviceConfig.h
+index 3cc3211f18..9f8769a93d 100644
+--- a/src/include/platform/CHIPDeviceConfig.h
++++ b/src/include/platform/CHIPDeviceConfig.h
+@@ -369,9 +369,7 @@
+  */
+ #ifndef CHIP_DEVICE_CONFIG_ROTATING_DEVICE_ID_UNIQUE_ID
+ #define CHIP_DEVICE_CONFIG_ROTATING_DEVICE_ID_UNIQUE_ID                                                                            \
+-    {                                                                                                                              \
+-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff                             \
+-    }
++    { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff }
+ #endif
+ 
+ /**
+@@ -1298,6 +1296,22 @@ static_assert(CHIP_DEVICE_CONFIG_BLE_EXT_ADVERTISING_INTERVAL_MIN <= CHIP_DEVICE
+ #define CHIP_DEVICE_CONFIG_DEFAULT_TELEMETRY_INTERVAL_MS 90000
+ #endif
+ 
++/**
++ * @def CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
++ *
++ * @brief
++ *   Log the setup passcode and the onboarding codes derived from it.
++ *
++ *  @note
++ *    Convenient during development, where the log is the only place to read the
++ *    code from. A product that has another way to present it — a label, a
++ *    display, an administration interface — should set this to 0, so that the
++ *    passcode does not end up in a system log that outlives commissioning.
++ */
++#ifndef CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
++#define CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD 1
++#endif
++
+ // -------------------- Test Setup (PASE) Configuration --------------------
+ 
+ /**
+diff --git a/src/include/platform/internal/GenericConfigurationManagerImpl.ipp b/src/include/platform/internal/GenericConfigurationManagerImpl.ipp
+index ece81909c8..df3a8a8287 100644
+--- a/src/include/platform/internal/GenericConfigurationManagerImpl.ipp
++++ b/src/include/platform/internal/GenericConfigurationManagerImpl.ipp
+@@ -768,6 +768,7 @@ void GenericConfigurationManagerImpl<ConfigClass>::LogDeviceConfig()
+ 
+     CommissionableDataProvider * cdp = GetCommissionableDataProvider();
+ 
++#if CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
+     {
+         uint32_t setupPasscode;
+         if ((cdp == nullptr) || (cdp->GetSetupPasscode(setupPasscode) != CHIP_NO_ERROR))
+@@ -776,6 +777,7 @@ void GenericConfigurationManagerImpl<ConfigClass>::LogDeviceConfig()
+         }
+         ChipLogProgress(DeviceLayer, "  Setup Pin Code (0 for UNKNOWN/ERROR): %" PRIu32 "", setupPasscode);
+     }
++#endif // CHIP_DEVICE_CONFIG_LOG_ONBOARDING_PAYLOAD
+ 
+     {
+         uint16_t setupDiscriminator;
+-- 
+2.55.0
+
