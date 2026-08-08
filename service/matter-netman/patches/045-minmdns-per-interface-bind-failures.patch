@@ -1,0 +1,173 @@
+From 6a6b37af66fc9f4efb8a7b4d72e75e6165d72034 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 8 Aug 2026 20:52:50 +0200
+Subject: [PATCH] [minmdns] do not lose every endpoint when one interface fails
+ to bind
+
+ServerBase::Listen() walks the interfaces the ListenIterator offers and binds a
+UDP endpoint on each. Bind and Listen were wrapped in ReturnErrorOnFailure, so a
+single interface failing aborted the loop, and ShutdownOnError then tore down the
+endpoints that had already been created. One bad interface therefore left the
+node with no mDNS at all rather than with one interface fewer -- the advertiser
+reports "Failed to initialize advertiser" and the node is undiscoverable.
+
+The iterator reports what the platform said was usable at the moment it was
+asked, which is not a promise that the bind will still succeed. IPv6Bind() puts
+the interface index in sin6_scope_id, so an interface that goes away between
+enumeration and bind fails with ENODEV. Interfaces churn exactly when this loop
+runs -- a Thread border router bringing up wpan0, or a reconfiguration that
+recreates a bridge -- and re-running Listen() is also how the advertiser picks
+interface changes up, so the two coincide by design.
+
+Treat a failed bind or listen the way a failed multicast join is already treated:
+log it, skip the interface, and keep the ones that work. The unicast query port
+is handled the same way, since it is an optimisation on top of an endpoint that
+has already bound successfully and giving up there would discard it. Running out
+of endpoints stays fatal for the multicast endpoint -- that is a global resource
+problem, and skipping interfaces would not make it any better.
+
+Two consequences of making those failures survivable, handled here:
+
+- kDnssdInitialized is now posted only when the interface actually ended up with
+  an endpoint. Reaching the end of the loop body no longer proves one was
+  created, so the event would otherwise announce a DNS-SD that is not listening.
+- interfaceName is initialised before use. GetInterfaceName leaves the buffer
+  untouched when it fails, and it fails precisely for an interface that has gone
+  away -- the case these new log lines exist to report. The pre-existing
+  multicast-join log had the same hazard in a rarer branch.
+
+Note that Listen() can now return success having bound nothing at all, if every
+interface failed. IsListening() already exists to ask that question, and the
+alternative -- failing the whole server because the interface set was in flux --
+is what this change is removing.
+
+Tested on the network-manager example in a network namespace with two dummy
+interfaces, injecting ENODEV for the bind on the first. Before, the advertiser
+failed to initialise and nothing was published; after, the failure is logged for
+that interface and the node advertises on the other one.
+
+Assisted-By: Claude Opus 5
+Signed-off-by: Christian Glombek <c.glombek@cosa.systems>
+---
+ src/lib/dnssd/minimal_mdns/Server.cpp | 79 +++++++++++++++++++++------
+ 1 file changed, 63 insertions(+), 16 deletions(-)
+
+diff --git a/src/lib/dnssd/minimal_mdns/Server.cpp b/src/lib/dnssd/minimal_mdns/Server.cpp
+index f59f84926c..858c2d5af0 100644
+--- a/src/lib/dnssd/minimal_mdns/Server.cpp
++++ b/src/lib/dnssd/minimal_mdns/Server.cpp
+@@ -209,20 +209,45 @@ CHIP_ERROR ServerBase::Listen(chip::Inet::EndPointManager<chip::Inet::UDPEndPoin
+ 
+     while (it->Next(&interfaceId, &addressType))
+     {
++        // GetInterfaceName leaves the buffer untouched when it fails, and it fails for exactly the
++        // interface this loop is about to have trouble with: one that has gone away since the
++        // iterator listed it. Name it the way BroadcastImpl below does rather than logging
++        // whatever the stack happened to hold.
++        char interfaceName[chip::Inet::InterfaceId::kMaxIfNameLength];
++        if (interfaceId.GetInterfaceName(interfaceName, sizeof(interfaceName)) != CHIP_NO_ERROR)
++        {
++            strcpy(interfaceName, "???");
++        }
++
++        // Running out of endpoints is a global resource problem rather than something about this
++        // interface, and skipping interfaces would not make it any better, so it stays fatal.
+         chip::Inet::UDPEndPointHandle listenUdp;
+         ReturnErrorOnFailure(udpEndPointManager->NewEndPoint(listenUdp));
+ 
+-        ReturnErrorOnFailure(listenUdp->Bind(addressType, chip::Inet::IPAddress::Any, port, interfaceId));
++        // Binding and listening, on the other hand, are per-interface: an interface the iterator
++        // reports as usable can still fail here, for instance while it is being reconfigured.
++        // Failing the whole call would leave the server with no endpoints at all, so skip that
++        // interface and keep the ones that do work.
++        CHIP_ERROR err = listenUdp->Bind(addressType, chip::Inet::IPAddress::Any, port, interfaceId);
++        if (err != CHIP_NO_ERROR)
++        {
++            ChipLogError(DeviceLayer, "MDNS failed to bind to %s for address type %s: %" CHIP_ERROR_FORMAT, interfaceName,
++                         AddressTypeStr(addressType), err.Format());
++            continue;
++        }
+ 
+-        ReturnErrorOnFailure(listenUdp->Listen(OnUdpPacketReceived, nullptr /*OnReceiveError*/, this));
++        err = listenUdp->Listen(OnUdpPacketReceived, nullptr /*OnReceiveError*/, this);
++        if (err != CHIP_NO_ERROR)
++        {
++            ChipLogError(DeviceLayer, "MDNS failed to listen on %s for address type %s: %" CHIP_ERROR_FORMAT, interfaceName,
++                         AddressTypeStr(addressType), err.Format());
++            continue;
++        }
+ 
+-        CHIP_ERROR err = listenUdp->JoinMulticastGroup(interfaceId, BroadcastIpAddresses::Get(addressType));
++        err = listenUdp->JoinMulticastGroup(interfaceId, BroadcastIpAddresses::Get(addressType));
+ 
+         if (err != CHIP_NO_ERROR)
+         {
+-            char interfaceName[chip::Inet::InterfaceId::kMaxIfNameLength];
+-            TEMPORARY_RETURN_IGNORED interfaceId.GetInterfaceName(interfaceName, sizeof(interfaceName));
+-
+             // Log only as non-fatal error. Failure to join will mean we reply to unicast queries only.
+             ChipLogError(DeviceLayer, "MDNS failed to join multicast group on %s for address type %s: %" CHIP_ERROR_FORMAT,
+                          interfaceName, AddressTypeStr(addressType), err.Format());
+@@ -236,27 +261,49 @@ CHIP_ERROR ServerBase::Listen(chip::Inet::EndPointManager<chip::Inet::UDPEndPoin
+         //   - has a *DRAWBACK* of unicast queries being considered LEGACY by mdns since they do
+         //     not originate from 5353 and the answers will include a query section.
+         chip::Inet::UDPEndPointHandle unicastQueryUdp;
+-        ReturnErrorOnFailure(udpEndPointManager->NewEndPoint(unicastQueryUdp));
+-        ReturnErrorOnFailure(unicastQueryUdp->Bind(addressType, chip::Inet::IPAddress::Any, 0, interfaceId));
+-        ReturnErrorOnFailure(unicastQueryUdp->Listen(OnUdpPacketReceived, nullptr /*OnReceiveError*/, this));
++        err = udpEndPointManager->NewEndPoint(unicastQueryUdp);
++        if (err == CHIP_NO_ERROR)
++        {
++            err = unicastQueryUdp->Bind(addressType, chip::Inet::IPAddress::Any, 0, interfaceId);
++        }
++        if (err == CHIP_NO_ERROR)
++        {
++            err = unicastQueryUdp->Listen(OnUdpPacketReceived, nullptr /*OnReceiveError*/, this);
++        }
++        if (err != CHIP_NO_ERROR)
++        {
++            // The unicast query port is an optimisation on top of the multicast endpoint, so
++            // giving up here would throw away an endpoint that already works. Answer legacy
++            // unicast queries from port 5353 instead.
++            ChipLogError(DeviceLayer, "MDNS failed to open a unicast query port on %s for address type %s: %" CHIP_ERROR_FORMAT,
++                         interfaceName, AddressTypeStr(addressType), err.Format());
++            unicastQueryUdp.Release();
++        }
+ #endif
+ 
+ #if CHIP_MINMDNS_USE_EPHEMERAL_UNICAST_PORT
+-        if (listenUdp || unicastQueryUdp)
++        bool interfaceIsListening = listenUdp || unicastQueryUdp;
++        if (interfaceIsListening)
+         {
+-            // If allocation fails, the rref will not be consumed, so that the endpoint will also be freed correctly
+-            mEndpoints.CreateObject(interfaceId, addressType, std::move(listenUdp), std::move(unicastQueryUdp));
++            // If allocation fails, the rref will not be consumed, so that the endpoint will also be freed correctly.
++            // An interface whose endpoint could not be registered is not listening.
++            interfaceIsListening =
++                mEndpoints.CreateObject(interfaceId, addressType, std::move(listenUdp), std::move(unicastQueryUdp)) != nullptr;
+         }
+ #else
+-        if (listenUdp)
++        bool interfaceIsListening = static_cast<bool>(listenUdp);
++        if (interfaceIsListening)
+         {
+-            // If allocation fails, the rref will not be consumed, so that the endpoint will also be freed correctly
+-            mEndpoints.CreateObject(interfaceId, addressType, std::move(listenUdp));
++            // If allocation fails, the rref will not be consumed, so that the endpoint will also be freed correctly.
++            // An interface whose endpoint could not be registered is not listening.
++            interfaceIsListening = mEndpoints.CreateObject(interfaceId, addressType, std::move(listenUdp)) != nullptr;
+         }
+ #endif
+ 
+         // If at least one IPv6 interface is used by the mDNS server, notify the application that DNS-SD is ready.
+-        if (!mIsInitialized && addressType == chip::Inet::IPAddressType::kIPv6)
++        // Only once an interface actually has an endpoint: now that a failure here is survivable, reaching this
++        // point is no longer proof that one was created.
++        if (interfaceIsListening && !mIsInitialized && addressType == chip::Inet::IPAddressType::kIPv6)
+         {
+ #if !CHIP_DEVICE_LAYER_NONE
+             chip::DeviceLayer::ChipDeviceEvent event{};
+-- 
+2.55.0
+

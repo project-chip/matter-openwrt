@@ -19,6 +19,8 @@ START=90
 USE_PROCD=1
 PROG=/usr/sbin/matter-network-manager-app
 
+extra_command "rebind" "Re-bind the mDNS sockets after an interface change"
+
 start_service() {
 	. /usr/share/matter/bootstrap.sh
 
@@ -50,6 +52,16 @@ restart() {
 		i=$((i + 1))
 	done
 	start "$@"
+}
+
+rebind() {
+	# The daemon enumerates its interfaces when the Matter server starts, so
+	# an interface that appears later is not advertised on. SIGHUP makes it
+	# redo that without dropping the CASE sessions a restart would take with
+	# it. A daemon built without the handler treats SIGHUP as fatal and procd
+	# respawns it, which is no worse than the restart this replaces.
+	running || return 0
+	procd_send_signal matter '*' HUP
 }
 
 service_triggers() {
