@@ -56,7 +56,7 @@ main() {
 	done
 
 	local rcp=any
-	if [ $# -gt 0 -a "$1" != "--" ]; then
+	if [ $# -gt 0 ] && [ "$1" != "--" ]; then
 		rcp="$1"
 		validate_rcp_selector "$rcp" || usage
 		shift
@@ -64,7 +64,7 @@ main() {
 
 	local launch=
 	if [ $# -gt 0 ]; then
-		[ "$1" = "--" -a $# -gt 1 ] || usage
+		[ "$1" = "--" ] && [ $# -gt 1 ] || usage
 		launch=1
 		shift
 	fi
@@ -81,7 +81,7 @@ main() {
 	local rcpdev="${REPLY% *}" installhid="${REPLY#* }"
 
 	# Install firmware if necessary
-	if [ -n "$update" -a "$installhid" != "-" ]; then
+	if [ -n "$update" ] && [ "$installhid" != "-" ]; then
 		install_rcp "$rcpdev" "$installhid" || return $?
 		rcpdev="${REPLY% *}" update=
 	fi
@@ -126,12 +126,12 @@ validate_rcp_selector() {  # selector
 find_rcp() {  # selector [include-installable] => $REPLY
 	local rcpdev= installdev= installhid=
 	usb_device_foreach _find_rcp_cb "$@"
-	if [ $? -eq "$RC_BREAK" -a -n "$rcpdev" ]; then
+	if [ $? -eq "$RC_BREAK" ] && [ -n "$rcpdev" ]; then
 		log debug "Found RCP interface $rcpdev for selector '$1'"
 		REPLY="$rcpdev -"
 		return 0
 	fi
-	if [ -n "$2" -a -n "$installdev" -a -n "$installhid" ]; then
+	if [ -n "$2" ] && [ -n "$installdev" ] && [ -n "$installhid" ]; then
 		log debug "Found installable $installhid device $installdev for selector '$1'"
 		REPLY="$installdev $installhid"
 		return 0
@@ -146,12 +146,12 @@ _find_rcp_cb() {  # selector [include-installable]
 
 	# Check for a usable cdc_acm interface and OpenThread product string
 	usb_interface_foreach "" _find_rcp_if_cb
-	[ $? -eq "$RC_BREAK" -a -n "$rcpdev" ] \
+	[ $? -eq "$RC_BREAK" ] && [ -n "$rcpdev" ] \
 		&& usb_read_property '' product && REPLY=" $REPLY " && [ "${REPLY/ OpenThread /}" != "$REPLY" ] \
 		&& return "$RC_BREAK"
 
 	# If requested, check if we could install RCP firmware on this device
-	if [ -n "$2" -a -n "$RCPFWHANDLERS" -a -z "$installdev" ]; then
+	if [ -n "$2" ] && [ -n "$RCPFWHANDLERS" ] && [ -z "$installdev" ]; then
 		local hid
 		for hid in $RCPFWHANDLERS; do
 			call_firmware_handler "$hid" installable "$DEVICENAME" && installdev="$DEVICENAME" installhid="$hid" && break
@@ -211,7 +211,7 @@ usb_device_foreach() {  # callback ... (with $DEVICENAME)
 	local _dev DEVICENAME
 	for _dev in /sys/bus/usb/devices/*; do
 		DEVICENAME="${_dev##*/}"  # e.g. "1-1"
-		[ "${DEVICENAME%:*}" = "$DEVICENAME" -a -f "$_dev/bDeviceClass" ] || continue
+		[ "${DEVICENAME%:*}" = "$DEVICENAME" ] && [ -f "$_dev/bDeviceClass" ] || continue
 		"$@"; [ $? -ne "$RC_BREAK" ] || return "$RC_BREAK"
 	done
 }
@@ -219,7 +219,7 @@ usb_device_foreach() {  # callback ... (with $DEVICENAME)
 usb_interface_foreach() {  # devicename callback ... (with $DEVICENAME)
 	local _dn="${1:-$DEVICENAME}" _if DEVICENAME; shift
 	for _if in "/sys/bus/usb/devices/$_dn/$_dn:"*; do
-		[ -d "$_if" -a -f "$_if/bInterfaceClass" ] || continue
+		[ -d "$_if" ] && [ -f "$_if/bInterfaceClass" ] || continue
 		DEVICENAME="${_if##*/}"  # e.g. "1-1:1.0"
 		"$@"; [ $? -ne "$RC_BREAK" ] || return "$RC_BREAK"
 	done
@@ -296,7 +296,7 @@ load_firmware_handlers() {  # => $RCPFWHANDLERS
 	local _script _hname _hid _type
 	RCPFWHANDLERS=
 	for _script in /usr/share/openthread-rcp/*.sh; do
-		[ -f "$_script" -a -r "$_script" ] || continue
+		[ -f "$_script" ] && [ -r "$_script" ] || continue
 		_hname="${_script##*/}"
 		_hid="${_hname%.sh}"; _hid="${_hid//-/_}"
 		if [ -n "${_hid//[a-z0-9_]}" ]; then
