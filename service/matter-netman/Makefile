@@ -15,7 +15,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=matter-netman
-PKG_RELEASE:=2
+PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/project-chip/connectedhomeip.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_SUBMODULES:=\
@@ -25,9 +25,9 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2026-06-13
-PKG_SOURCE_VERSION:=b39eff6ed09e92344c3c6cc9a5a1b495a469bbfd
-PKG_MIRROR_HASH:=cc87d6df5cc945309bea4c810ba90081fa59dfaaa1daedf9fa199d17e3f313f8
+PKG_SOURCE_DATE:=2026-07-30
+PKG_SOURCE_VERSION:=72ecdc2bca57e99b3defea68eb3bcc5bd8bebdbd
+PKG_MIRROR_HASH:=6812910e012294a9b812bc7550e352e981627e8bec932d3634e098be68ebe7fb
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
