@@ -1,0 +1,40 @@
+From b3da12bdc5bc8a29145e1a4a67d07c889befe753 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Sat, 8 Aug 2026 17:48:32 +1200
+Subject: [PATCH] mbedtls: Fix inverted -SHA256 suffix test in
+ tls_mbedtls_set_ciphers
+
+The intent of the logic appears to be to handle cases where the Mbed TLS
+cipher name carries a trailing "-SHA256" that the OpenSSL name omits
+(treating SHA-256 as the implied default hash), e.g. the OpenSSL name
+"ECDHE-RSA-CHACHA20-POLY1305" corresponds to the Mbed TLS name
+"TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256". The os_memcmp expression
+intended to check for this suffix was missing a `== 0`.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/tls_mbedtls.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
+index dd508b767..c11418bb4 100644
+--- a/src/crypto/tls_mbedtls.c
++++ b/src/crypto/tls_mbedtls.c
+@@ -1246,9 +1246,13 @@ tls_mbedtls_set_ciphers(struct tls_conf *tls_conf, const char *ciphers)
+                     blen -= 4;
+                 }
+             }
++            /* Some mbedtls cipher names carry a trailing "-SHA256" that the
++             * openssl name omits (treating SHA-256 as the implied default
++             * hash), e.g. openssl "ECDHE-RSA-CHACHA20-POLY1305" for mbedtls
++             * "TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256". */
+             if (blen >= clen && os_memcmp(ciphers, buf, clen) == 0
+                 && (blen == clen
+-                    || (blen == clen+7 && os_memcmp(buf+clen, "-SHA256", 7)))) {
++                    || (blen == clen+7 && os_memcmp(buf+clen, "-SHA256", 7) == 0))) {
+                 if (1 >= idsz - (nids + 1)) {
+                     emsg(MSG_ERROR,
+                          "error: too many ciphers during list expand");
+-- 
+2.50.1 (Apple Git-155)
+

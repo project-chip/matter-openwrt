@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Project CHIP Authors
+# Copyright (c) 2023-2026 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,5 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+OVERLAY_RELEASE:=1
+
 include ../../include/overlay.mk
+
+define Overlay/BuildConfig
+# safe for all variants, no-op when CONFIG_EAP_TLS is not enabled
+DRIVER_MAKEOPTS += CONFIG_EAP_TLS_PINNING=y
+endef
+
 $(eval $(call BuildPackageOverlay,network/services/hostapd))

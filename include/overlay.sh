@@ -1,6 +1,6 @@
 #!/bin/bash -e
 
-# Copyright (c) 2023 Project CHIP Authors
+# Copyright (c) 2023-2026 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,6 +37,11 @@ for p in .base/patches/* .overlay/patches/*; do
     ln -s "../$p" patches/
 done
 for f in .base/*; do
-    [[ "$f" == .base/patches ]] && continue
+    [[ "$f" == .base/patches || "$f" == .base/Makefile ]] && continue
     ln -s "$f" .
 done
+
+awk 'BEGIN { inj = ENVIRON["OVERLAY_INJECT"] }
+     inj && /^[^#]*\$\(call (Build|Kernel)Package,/ { print inj; inj="" }{ print }
+     END { if (inj) { print "Overlay injection failed" >"/dev/stderr"; exit 3 }}' \
+    .base/Makefile >Makefile

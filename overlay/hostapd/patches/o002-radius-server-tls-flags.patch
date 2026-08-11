@@ -1,0 +1,33 @@
+From d48cfba4d28b2636566a105b529da528393d1fd1 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Sat, 8 Aug 2026 17:50:57 +1200
+Subject: [PATCH] RADIUS server: Pass consistent tls_flags
+
+Ensure the tls_flags passed to tls_init() and tls_global_set_params()
+match, so the overall behavior is consistent between TLS backends (Only
+WolfSSL actually honors flags passed to tls_init()).
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ hostapd/radius.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/hostapd/radius.c b/hostapd/radius.c
+index 0b4f76ee2..97dce56ae 100644
+--- a/hostapd/radius.c
++++ b/hostapd/radius.c
+@@ -564,6 +564,11 @@ static int radius_setup(struct radius_state *s, struct radius_config *c)
+ 		.cb_ctx = s,
+ 	};
+ 
++	/* Most backends ignore tls_config.tls_flags. Pass identical flags
++	 * via tls_connection_params so the behavior is the same either way. */
++	c->tls.flags |= conf.tls_flags;
++	conf.tls_flags = c->tls.flags;
++
+ 	eap->eap_server = 1;
+ 	eap->max_auth_rounds = 100;
+ 	eap->max_auth_rounds_short = 50;
+-- 
+2.50.1 (Apple Git-155)
+
