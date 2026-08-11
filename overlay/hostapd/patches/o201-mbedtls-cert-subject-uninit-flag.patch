@@ -1,0 +1,36 @@
+From 89722e8488a0bfa2095c1597725e0f9c957c1664 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Sat, 8 Aug 2026 01:59:48 +1200
+Subject: [PATCH] mbedtls: Fix uninitialized flag in check_cert_subject
+ matching
+
+tls_mbedtls_match_dn_field() populates one struct mlistoid per component
+of the check_cert_subject string, but never initializes the prefix flag,
+which is only assigned when the value ends in '*'. Whether a component
+without a wildcard was matched as a prefix therefore depended on
+leftover stack contents, e.g.  check_cert_subject="O=w1.f" could be
+accepted for an Organization of "w1.fi".
+
+Found by ap_wpa2_eap_ttls_pap_check_cert_subject_neg, which happens to
+check "C=FI1*" immediately before "O=w1.f".
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/tls_mbedtls.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/crypto/tls_mbedtls.c b/src/crypto/tls_mbedtls.c
+index 69aa032a8..dd508b767 100644
+--- a/src/crypto/tls_mbedtls.c
++++ b/src/crypto/tls_mbedtls.c
+@@ -2845,6 +2845,7 @@ tls_mbedtls_match_dn_field(mbedtls_x509_crt *crt, const char *match)
+ 		tok = os_strchr(s, '/');
+ 		list[nlist].oid = NULL;
+ 		list[nlist].olen = 0;
++		list[nlist].prefix = 0;
+ 		list[nlist].n = tok ? (size_t)(tok - s) : os_strlen(s);
+ 		e = memchr(s, '=', list[nlist].n);
+ 		if (e == NULL) {
+-- 
+2.50.1 (Apple Git-155)
+
