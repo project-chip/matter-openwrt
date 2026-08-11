@@ -1,29 +1,38 @@
-From 291ecbd493f3aff3a561531cf982ce4f01c0f2ae Mon Sep 17 00:00:00 2001
+From e52755c05ab4d48f63bd9ae0b56fb10d0477e628 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 3 Jul 2026 23:12:12 +1200
 Subject: [PATCH] EAP-TLS server: Add support for client cert pinning
 
-Allow the hostapd EAP-TLS server to authenticate clients against a certificate
-allow-list in addition to, or instead of, PKI trust-chain validation. Pinning
-is configured via the per-BSS eap_tls_cert_pinning option:
+Allow the hostapd EAP-TLS server to authenticate clients against a
+certificate allow-list in addition to, or instead of, PKI trust-chain
+validation. Pinning is configured via the per-BSS eap_tls_cert_pinning
+option:
   0 = disabled (default, normal PKI validation only)
   1 = require an allow-list match in addition to trust-chain validation
-  2 = pin only; skip trust-chain validation and accept any leaf whose SHA-256
-      is in the allow-list (no ca_cert required)
+  2 = pin only; skip trust-chain validation and accept any leaf whose
+      SHA-256 is in the allow-list (no ca_cert required)
 
-The allow-list reuses the existing EAP user database: each authorized client is
-a "cert-sha256-<hex>" entry based on the SHA-256 hash of the client (leaf)
-certificate in DER form. An exact (non-wildcard) match is required so that a
-"*" entry won't authorize arbitrary certificates. Pinning behaves identically
-whether EAP is terminated by the integrated authenticator or the RADIUS server.
+The allow-list reuses the existing EAP user database: each authorized
+client is a "cert-sha256-<hex>" entry based on the SHA-256 hash of the
+client (leaf) certificate in DER form. An exact (non-wildcard) match is
+required so that a "*" entry won't authorize arbitrary certificates.
+Pinning behaves identically whether EAP is terminated by the integrated
+authenticator or the RADIUS server.
 
-Pin-only mode utilizes a new TLS_CONN_DISABLE_CHAIN_VALIDATION flag. The peer
-certificate is retrieved via a new tls_connection_get_peer_cert() function.
-Both are implemented for the OpenSSL and wolfSSL backends.
+When pinning is enabled, it supersedes check_cert_subject and the
+cert-<serial> lookup: When the full leaf certificate is pinned via its
+hash, additionally validating the subject field or performing another
+lookup via the serial number is superfluous. The serial lookup would
+also clobber the sm->user record that was already populated by the
+pinning code.
 
-The feature is guarded by the CONFIG_EAP_TLS_PINNING build flag; builds against
-other TLS backends (GnuTLS, internal) are not supported and will fail to link
-with the feature enabled.
+Pin-only mode utilizes a new TLS_CONN_DISABLE_CHAIN_VALIDATION flag. The
+peer certificate is retrieved via a new tls_connection_get_peer_cert()
+function.  Both are implemented for the OpenSSL and wolfSSL backends.
+
+The feature is guarded by the CONFIG_EAP_TLS_PINNING build flag; builds
+against other TLS backends (GnuTLS, internal) are not supported and will
+fail to link with the feature enabled.
 
 The added hwsim tests pass with both OpenSSL and wolfSSL.
 
@@ -32,21 +41,21 @@ Signed-off-by: Karsten Sperling <ksperling@apple.com>
  hostapd/Makefile                        |   4 +
  hostapd/config_file.c                   |  12 ++
  hostapd/defconfig                       |   7 +
- hostapd/hostapd.conf                    |  15 ++
+ hostapd/hostapd.conf                    |  19 ++
  src/ap/ap_config.h                      |   1 +
- src/ap/authsrv.c                        |  13 ++
+ src/ap/authsrv.c                        |  14 ++
  src/ap/eap_user_db.c                    |   4 +
  src/ap/ieee802_1x.c                     |   1 +
  src/crypto/tls.h                        |  11 ++
  src/crypto/tls_openssl.c                |  15 ++
  src/crypto/tls_wolfssl.c                |  15 ++
- src/eap_peer/eap_tls.c                  |   6 +-
+ src/eap_peer/eap_tls.c                  |   7 +-
  src/eap_server/eap.h                    |  11 ++
- src/eap_server/eap_server_tls.c         |  65 ++++++-
+ src/eap_server/eap_server_tls.c         |  76 +++++++-
  src/eap_server/eap_server_tls_common.c  |  10 +
  tests/hwsim/example-hostapd.config      |   1 +
- tests/hwsim/test_ap_eap_tls_cert_pin.py | 232 ++++++++++++++++++++++++
- 17 files changed, 421 insertions(+), 2 deletions(-)
+ tests/hwsim/test_ap_eap_tls_cert_pin.py | 233 ++++++++++++++++++++++++
+ 17 files changed, 439 insertions(+), 2 deletions(-)
  create mode 100644 tests/hwsim/test_ap_eap_tls_cert_pin.py
 
 diff --git a/hostapd/Makefile b/hostapd/Makefile
@@ -88,7 +97,7 @@ index 71ba55c61..c9630d8c5 100644
  		bss->max_auth_rounds = atoi(pos);
  	} else if (os_strcmp(buf, "max_auth_rounds_short") == 0) {
 diff --git a/hostapd/defconfig b/hostapd/defconfig
-index 8af8ecd95..132bff169 100644
+index 8af8ecd95..4abc476ad 100644
 --- a/hostapd/defconfig
 +++ b/hostapd/defconfig
 @@ -74,6 +74,13 @@ CONFIG_EAP_MD5=y
@@ -98,18 +107,18 @@ index 8af8ecd95..132bff169 100644
 +# EAP-TLS server client-certificate pinning (allow-list authorization)
 +# Authorize EAP-TLS clients by matching the SHA-256 of their leaf certificate
 +# against "cert-sha256-<hex>" entries in the EAP user database, optionally in
-+# place of PKI trust-chain validation (see eap_tls_cert_pinning in hostapd.conf).
-+# Requires CONFIG_EAP_TLS.
++# place of PKI trust-chain validation (see eap_tls_cert_pinning in
++# hostapd.conf). Requires CONFIG_EAP_TLS.
 +#CONFIG_EAP_TLS_PINNING=y
 +
  # EAP-MSCHAPv2 for the integrated EAP server
  CONFIG_EAP_MSCHAPV2=y
  
 diff --git a/hostapd/hostapd.conf b/hostapd/hostapd.conf
-index 338a16c82..3f3d4e76a 100644
+index c9fe0d31f..18bbf30b0 100644
 --- a/hostapd/hostapd.conf
 +++ b/hostapd/hostapd.conf
-@@ -1373,6 +1373,21 @@ eap_server=0
+@@ -1373,6 +1373,25 @@ eap_server=0
  # [ENABLE-TLSv1.3] = enable TLSv1.3 (experimental - disabled by default)
  #tls_flags=[flag1][flag2]...
  
@@ -126,6 +135,10 @@ index 338a16c82..3f3d4e76a 100644
 +# Compute the hash with, e.g.:
 +#   openssl x509 -in client.pem -outform DER | openssl dgst -sha256
 +# Note that wildcard entries (e.g. "cert-*") are not accepted for this purpose.
++# When pinning is enabled, it supersedes check_cert_subject and cert-<serial>
++# user lookups: only the cert-sha256-<hash> user entry is used.
++# If TLS session resumption is enabled (tls_session_lifetime > 0), removing an
++# entry from the user file does not invalidate matching cached sessions.
 +#eap_tls_cert_pinning=0
 +
  # Maximum number of EAP message rounds with data (default: 100)
@@ -144,7 +157,7 @@ index ab48a8b3d..69e5c6dc1 100644
  	int check_crl_strict;
  	unsigned int crl_reload_interval;
 diff --git a/src/ap/authsrv.c b/src/ap/authsrv.c
-index 26f54bc3e..d1747b22c 100644
+index 26f54bc3e..9c2bc8404 100644
 --- a/src/ap/authsrv.c
 +++ b/src/ap/authsrv.c
 @@ -67,6 +67,7 @@ static int hostapd_radius_get_eap_user(void *ctx, const u8 *identity,
@@ -163,14 +176,15 @@ index 26f54bc3e..d1747b22c 100644
  	cfg->max_auth_rounds = hapd->conf->max_auth_rounds;
  	cfg->max_auth_rounds_short = hapd->conf->max_auth_rounds_short;
  	if (hapd->conf->pac_opaque_encr_key)
-@@ -437,6 +439,17 @@ int authsrv_init(struct hostapd_data *hapd)
+@@ -437,6 +439,18 @@ int authsrv_init(struct hostapd_data *hapd)
  		params.ocsp_stapling_response_multi =
  			hapd->conf->ocsp_stapling_response_multi;
  		params.check_cert_subject = hapd->conf->check_cert_subject;
 +#ifdef CONFIG_EAP_TLS_PINNING
 +		/* Exact certificate pinning supersedes subject matching, so
 +		 * don't configure the latter in the TLS backend when both are
-+		 * enabled. This keeps the behavior consistent across backends. */
++		 * enabled. This also keeps the behavior consistent across
++		 * backends. */
 +		if (hapd->conf->eap_tls_cert_pinning &&
 +		    hapd->conf->check_cert_subject) {
 +			wpa_printf(MSG_WARNING,
@@ -182,7 +196,7 @@ index 26f54bc3e..d1747b22c 100644
  
  		if (tls_global_set_params(hapd->ssl_ctx, &params)) {
 diff --git a/src/ap/eap_user_db.c b/src/ap/eap_user_db.c
-index c0e903040..54a2054a9 100644
+index c0e903040..b58a65303 100644
 --- a/src/ap/eap_user_db.c
 +++ b/src/ap/eap_user_db.c
 @@ -122,6 +122,10 @@ static int get_wildcard_cb(void *ctx, int argc, char *argv[], char *col[])
@@ -190,17 +204,17 @@ index c0e903040..54a2054a9 100644
  		user->password = (u8 *) os_strdup(argv[id]);
  		user->next = (void *) 1;
 +		/* This is a prefix (wildcard) match, not an exact identity
-+		 * match; mark it as such so callers can distinguish the two
-+		 * (e.g. EAP-TLS certificate pinning requires an exact match). */
++		 * match; mark it as such since some use cases (e.g. EAP-TLS
++		 * certificate pinning) require an exact match. */
 +		user->wildcard_prefix = 1;
  		set_user_methods(user, argv[methods]);
  	}
  
 diff --git a/src/ap/ieee802_1x.c b/src/ap/ieee802_1x.c
-index b0c386053..5f0b579a0 100644
+index 349e489c6..90bc43d70 100644
 --- a/src/ap/ieee802_1x.c
 +++ b/src/ap/ieee802_1x.c
-@@ -2391,6 +2391,7 @@ static int ieee802_1x_get_eap_user(void *ctx, const u8 *identity,
+@@ -2389,6 +2389,7 @@ static int ieee802_1x_get_eap_user(void *ctx, const u8 *identity,
  
  	os_memset(user, 0, sizeof(*user));
  	user->phase2 = phase2;
@@ -238,10 +252,10 @@ index f839f9dfb..74860ba96 100644
   * tls_connection_get_own_cert_used - Was own certificate used
   * @conn: Connection context data from tls_connection_init()
 diff --git a/src/crypto/tls_openssl.c b/src/crypto/tls_openssl.c
-index 08a912e45..58c38c1fb 100644
+index eb36797c8..018d8f859 100644
 --- a/src/crypto/tls_openssl.c
 +++ b/src/crypto/tls_openssl.c
-@@ -3670,6 +3670,13 @@ int tls_connection_set_verify(void *ssl_ctx, struct tls_connection *conn,
+@@ -3669,6 +3669,13 @@ int tls_connection_set_verify(void *ssl_ctx, struct tls_connection *conn,
  		SSL_set_verify(conn->ssl, SSL_VERIFY_NONE, NULL);
  	}
  
@@ -255,7 +269,7 @@ index 08a912e45..58c38c1fb 100644
  	if (tls_set_conn_flags(conn, flags, NULL) < 0)
  		return -1;
  	conn->flags = flags;
-@@ -6312,6 +6319,14 @@ const char * tls_connection_get_peer_subject(struct tls_connection *conn)
+@@ -6311,6 +6318,14 @@ const char * tls_connection_get_peer_subject(struct tls_connection *conn)
  }
  
  
@@ -304,19 +318,20 @@ index 3bf52d64e..1dfd89385 100644
  				     struct wpabuf *data)
  {
 diff --git a/src/eap_peer/eap_tls.c b/src/eap_peer/eap_tls.c
-index 7e167f0b2..b4d6af5a5 100644
+index 7e167f0b2..639eb93f2 100644
 --- a/src/eap_peer/eap_tls.c
 +++ b/src/eap_peer/eap_tls.c
-@@ -44,7 +44,11 @@ static void * eap_tls_init(struct eap_sm *sm)
+@@ -44,7 +44,12 @@ static void * eap_tls_init(struct eap_sm *sm)
  		cert = &config->machine_cert;
  	else
  		cert = &config->phase2_cert;
 -	if (!cert->private_key && cert->engine == 0) {
 +	if (!cert->private_key && cert->engine == 0
 +#ifdef CONFIG_TESTING_OPTIONS
-+	    && !(config->phase1 && os_strstr(config->phase1, "tls_no_client_cert=1"))
++	    && !(config->phase1 &&
++		 os_strstr(config->phase1, "tls_no_client_cert=1"))
 +#endif /* CONFIG_TESTING_OPTIONS */
-+		) {
++	    ) {
  		wpa_printf(MSG_INFO, "EAP-TLS: Private key not configured");
  		return NULL;
  	}
@@ -350,7 +365,7 @@ index dd02b0cdb..ff11dba5d 100644
  	 * eap_sim_aka_result_ind - EAP-SIM/AKA protected success indication
  	 *
 diff --git a/src/eap_server/eap_server_tls.c b/src/eap_server/eap_server_tls.c
-index 0caa4c3b7..7e10736ff 100644
+index 0caa4c3b7..6c74e27d1 100644
 --- a/src/eap_server/eap_server_tls.c
 +++ b/src/eap_server/eap_server_tls.c
 @@ -9,6 +9,8 @@
@@ -375,7 +390,7 @@ index 0caa4c3b7..7e10736ff 100644
 +	size_t len[1];
 +	u8 hash[SHA256_MAC_LEN];
 +	char id[sizeof("cert-sha256-") + 2 * SHA256_MAC_LEN];
-+	int prefix_len;
++	int id_len;
 +
 +	cert = tls_connection_get_peer_cert(data->ssl.conn);
 +	if (!cert) {
@@ -392,15 +407,15 @@ index 0caa4c3b7..7e10736ff 100644
 +	}
 +	wpabuf_free(cert);
 +
-+	prefix_len = os_snprintf(id, sizeof(id), "cert-sha256-");
-+	if (os_snprintf_error(sizeof(id), prefix_len))
++	id_len = os_snprintf(id, sizeof(id), "cert-sha256-");
++	if (os_snprintf_error(sizeof(id), id_len))
 +		return -1;
-+	wpa_snprintf_hex(id + prefix_len, sizeof(id) - prefix_len, hash,
-+			 sizeof(hash));
++	id_len += wpa_snprintf_hex(id + id_len, sizeof(id) - id_len,
++				   hash, sizeof(hash));
 +
 +	/* Require an exact match so that a wildcard ("*") method-selection
 +	 * entry does not authorize an arbitrary certificate. */
-+	if (eap_user_get(sm, (const u8 *) id, os_strlen(id), 0) < 0 ||
++	if (eap_user_get(sm, (const u8 *) id, id_len, data->phase2) != 0 ||
 +	    !sm->user || !sm->user->exact_match) {
 +		wpa_printf(MSG_INFO,
 +			   "EAP-TLS: Client certificate %s not in allow-list",
@@ -417,27 +432,41 @@ index 0caa4c3b7..7e10736ff 100644
  static struct wpabuf * eap_tls_buildReq(struct eap_sm *sm, void *priv, u8 id)
  {
  	struct eap_tls_data *data = priv;
-@@ -181,9 +231,22 @@ check_established:
+@@ -178,12 +228,36 @@ static struct wpabuf * eap_tls_buildReq(struct eap_sm *sm, void *priv, u8 id)
+ 
+ check_established:
+ 	if (data->established && data->ssl.state != WAIT_FRAG_ACK) {
++		/* This code is shared with UNAUTH-TLS, but pinning the client
++		 * certificate is only applicable to EAP-TLS proper. */
++		bool use_cert_pinning = (data->eap_type == EAP_TYPE_TLS) &&
++			sm->cfg->eap_tls_cert_pinning != EAP_TLS_CERT_PIN_OFF;
++
  		/* TLS handshake has been completed and there are no more
  		 * fragments waiting to be sent out. */
  		wpa_printf(MSG_DEBUG, "EAP-TLS: Done");
++
 +#ifdef CONFIG_EAP_TLS_PINNING
-+		if (sm->cfg->eap_tls_cert_pinning &&
-+		    /* No certificates are exchanged when a session is resumed */
++		if (use_cert_pinning &&
++		    /* No certificates are exchanged when a session is resumed,
++		     * but the pinning check must have passed on the original
++		     * session for it to be marked resumable. Note that the
++		     * allow-list is not re-checked and sm->user not updated
++		     * for a resumed session. */
 +		    !tls_connection_resumed(sm->cfg->ssl_ctx, data->ssl.conn) &&
 +		    eap_tls_authorize_client_cert(sm, data) < 0) {
-+			/* Fail before marking the session successful/resumable */
++			/* Fail before marking the session valid/resumable */
 +			eap_tls_state(data, FAILURE);
 +			wpabuf_free(res);
 +			return NULL; /* EAP-Failure */
 +		}
 +#endif /* CONFIG_EAP_TLS_PINNING */
++
  		eap_tls_state(data, SUCCESS);
  		eap_tls_valid_session(sm, data);
 -		if (sm->serial_num) {
-+		if (sm->serial_num &&
-+		    /* Don't clobber the sm->user set via cert pinning */
-+		    !sm->cfg->eap_tls_cert_pinning) {
++		/* Pinning supersedes the serial number lookup; we can't do
++		 * both because we would clobber the sm->user from pinning. */
++		if (!use_cert_pinning && sm->serial_num) {
  			char user[128];
  			int user_len;
  
@@ -476,10 +505,10 @@ index 58b07513b..a2b526a27 100644
  CONFIG_EAP_GTC=y
 diff --git a/tests/hwsim/test_ap_eap_tls_cert_pin.py b/tests/hwsim/test_ap_eap_tls_cert_pin.py
 new file mode 100644
-index 000000000..c13e1a695
+index 000000000..652718955
 --- /dev/null
 +++ b/tests/hwsim/test_ap_eap_tls_cert_pin.py
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,233 @@
 +# Tests for EAP-TLS client certificate pinning
 +# Copyright (c) 2026 Apple Inc
 +#
@@ -689,6 +718,7 @@ index 000000000..c13e1a695
 +    hparams["tls_flags"] = "[ENABLE-TLSv1.3]"
 +    hparams["tls_session_lifetime"] = "60"
 +    hapd = hostapd.add_ap(apdev[0], hparams)
++    check_tls13_support(hapd)
 +    check_tls_session_resumption_capa(dev[0], hapd)
 +
 +    phase1 = "tls_disable_tlsv1_0=1 tls_disable_tlsv1_1=1 tls_disable_tlsv1_2=1 tls_disable_tlsv1_3=0"

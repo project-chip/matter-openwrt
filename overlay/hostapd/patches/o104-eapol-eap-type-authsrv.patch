@@ -1,28 +1,31 @@
-From c299e99ef1d14abfe357b8dea57580e22fb18fa0 Mon Sep 17 00:00:00 2001
+From 0f872f26e61e17f0da888557e28211290c539a05 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 24 Jul 2026 13:15:20 +1200
-Subject: [PATCH] Populate EAPOL eap_type_authsrv when using eap_server=1
+Subject: [PATCH] EAPOL auth: Populate eap_type_authsrv when eap_server=1
 
-This field was previously only populated in the RADIUS passthrough code path in
-ieee802_1x_decapsulate_radius(). Moving the logic into eapol_auth_tx_req()
-means it covers both the RADIUS and internal EAP server paths.
+This field was previously only populated in the RADIUS passthrough code
+path in ieee802_1x_decapsulate_radius(). Moving the logic into
+eapol_auth_tx_req() means it covers both the RADIUS and internal EAP
+server paths.
 
 This fixes the EAP type captured in the PMKSA cache and displayed in log
-messages (e.g. "IEEE 802.1X: authenticated - EAP type: 13" instead of 0), and
-avoids bogus "Supplicant used different EAP type" logs on EAP failure.
+messages (e.g. "IEEE 802.1X: authenticated - EAP type: 13" instead of
+0), and avoids bogus "Supplicant used different EAP type" logs on EAP
+failure.
 
-The call to eap_get_type() is now also guarded by a check for EAP_CODE_REQUEST,
-which avoids mis-counting an EAP_ERP_TYPE_REAUTH_START as an Identity Request
-in dot1xAuthEapolReqIdFramesTx.
+The call to eap_get_type() is now also guarded by a check for
+EAP_CODE_REQUEST, which avoids mis-counting an EAP_ERP_TYPE_REAUTH_START
+as an Identity Request in dot1xAuthEapolReqIdFramesTx.
 
 Signed-off-by: Karsten Sperling <ksperling@apple.com>
 ---
- src/ap/ieee802_1x.c            |  2 --
- src/eapol_auth/eapol_auth_sm.c | 12 +++++++++++-
- 2 files changed, 11 insertions(+), 3 deletions(-)
+ src/ap/ieee802_1x.c              |  2 --
+ src/eapol_auth/eapol_auth_sm.c   | 12 +++++++++++-
+ src/eapol_auth/eapol_auth_sm_i.h |  2 +-
+ 3 files changed, 12 insertions(+), 4 deletions(-)
 
 diff --git a/src/ap/ieee802_1x.c b/src/ap/ieee802_1x.c
-index 5f0b579a0..90bc43d70 100644
+index b0c386053..349e489c6 100644
 --- a/src/ap/ieee802_1x.c
 +++ b/src/ap/ieee802_1x.c
 @@ -1566,8 +1566,6 @@ static void ieee802_1x_decapsulate_radius(struct hostapd_data *hapd,
@@ -71,6 +74,19 @@ index af962eefe..150635c6d 100644
  		sm->dot1xAuthEapolReqIdFramesTx++;
  	else
  		sm->dot1xAuthEapolReqFramesTx++;
+diff --git a/src/eapol_auth/eapol_auth_sm_i.h b/src/eapol_auth/eapol_auth_sm_i.h
+index c970e73dd..8913498dd 100644
+--- a/src/eapol_auth/eapol_auth_sm_i.h
++++ b/src/eapol_auth/eapol_auth_sm_i.h
+@@ -154,7 +154,7 @@ struct eapol_state_machine {
+ 	u8 *identity;
+ 	size_t identity_len;
+ 	u8 eap_type_authsrv; /* EAP type of the last EAP packet from
+-			      * Authentication server */
++			      * Authentication server to Supplicant */
+ 	u8 eap_type_supp; /* EAP type of the last EAP packet from Supplicant */
+ 	struct radius_class_data radius_class;
+ 	struct wpabuf *radius_cui; /* Chargeable-User-Identity */
 -- 
 2.50.1 (Apple Git-155)
 

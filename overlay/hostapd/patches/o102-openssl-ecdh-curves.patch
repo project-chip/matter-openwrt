@@ -1,19 +1,20 @@
-From beec41ab1115a797d541ac36bfd1f7d07a1e4d9e Mon Sep 17 00:00:00 2001
+From 20b73be7ad609ac6cff408d6a379a961cfb48024 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Wed, 22 Mar 2023 10:58:42 +1300
 Subject: [PATCH] wpa_supplicant: Add per-network openssl_ecdh_curves option
 
-Add an openssl_ecdh_curves network-block configuration option to wpa_supplicant
-(hostapd already has this option). The value is passed through eap_peer_config
-into tls_connection_params and applied per connection via
-tls_connection_set_params(), which both the OpenSSL and wolfSSL backends
-already support.
+Add an openssl_ecdh_curves network-block configuration option to
+wpa_supplicant (hostapd already has this option). The value is passed
+through eap_peer_config into tls_connection_params and applied per
+connection via tls_connection_set_params(), which both the OpenSSL and
+wolfSSL backends already support.
 
-Note that (unlike openssl_ciphers) this option is per-network only, with no
-corresponding global option. Adding a global option would require either adding
-the corresponding field to the tls_config struct accepted by tls_init() and
-adapting all relevant backends to handle that field, or changing the supplicant
-to call tls_global_set_params() after tls_init().
+Note that (unlike openssl_ciphers) this option is per-network only, with
+no corresponding global option. Adding a global option would require
+either adding the corresponding field to the tls_config struct accepted
+by tls_init() and adapting all relevant backends to handle that field,
+or changing the supplicant to call tls_global_set_params() after
+tls_init().
 
 Signed-off-by: Karsten Sperling <ksperling@apple.com>
 ---
@@ -102,10 +103,10 @@ index 9bf96c442..dc49c60b2 100644
  	"wep_key0", "wep_key1", "wep_key2", "wep_key3",
  	"wep_tx_keyidx", "priority",
 diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
-index f7852293b..078870add 100644
+index 4ce8cae3b..9e8b0334a 100644
 --- a/wpa_supplicant/wpa_supplicant.conf
 +++ b/wpa_supplicant/wpa_supplicant.conf
-@@ -1571,6 +1571,11 @@ fast_reauth=1
+@@ -1577,6 +1577,11 @@ fast_reauth=1
  #	This can be used to override the global openssl_ciphers configuration
  #	parameter (see above).
  #

@@ -1,120 +1,151 @@
-From b7cae36c0bb350e5a6940d320837cdba29961796 Mon Sep 17 00:00:00 2001
+From 01d65c1d5a6413607090bb97e1fed6ac0844fae2 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Tue, 21 Mar 2023 23:15:53 +1300
 Subject: [PATCH] OpenSSL: Configure TLS 1.3 ciphersuites from openssl_ciphers
 
-OpenSSL introduced a separate API for configuration of TLS 1.3 cipher suites,
-distinct from the list of TLS <=1.2 ciphers. Other implementations (e.g.
-wolfSSL, BoringSSL, and MbedTLS) accept both generations in their existing
-cipher list APIs. This change adds support for configuring TLS 1.3 suites in
-OpenSSL from a similar combined list.
+OpenSSL introduced a separate API for configuration of TLS 1.3 cipher
+suites, distinct from the list of TLS <=1.2 ciphers. Other
+implementations (including wolfSSL, BoringSSL, LibreSSL, and MbedTLS)
+accept both generations in their existing cipher list APIs. This change
+adds support for configuring TLS 1.3 suites in OpenSSL from a similar
+combined list.
 
-This is done by separating the combined list into TLS 1.3 suites (they all
-start with "TLS_"), and legacy (pre-1.3) ciphers.  If the list contains no
-legacy ciphers then that list is explicitly cleared, effectively resulting in a
-1.3-only configuration. If the list contains no TLS 1.3 suites, the default
-suites are left unchanged. This preserves the current behavior of letting such
-configurations limit the list of accepted legacy ciphers without disabling TLS
-1.3 as an unintended side effect.
+This is done by separating the combined list into TLS 1.3 suites (they
+all start with "TLS_"), and legacy (pre-1.3) ciphers. If the list
+contains no legacy ciphers then that list is explicitly cleared,
+effectively resulting in a 1.3-only configuration. If the list contains
+no TLS 1.3 suites, the default suites are left unchanged. This preserves
+the current behavior of letting such configurations limit the list of
+accepted legacy ciphers without disabling TLS 1.3 as an unintended side
+effect.
 
-Note that wolfSSL has similar logic driven by its combined cipher list API
-internally. BoringSSL implements a more opinionated version of the same policy
-by recognizing 1.3 suite names in the cipher list, but simply keeps all the 1.3
-suites it supports enabled at all times.
+Note that wolfSSL has similar logic driven by its combined cipher list
+API internally. BoringSSL implements a more opinionated version of the
+same policy by recognizing 1.3 suite names in the cipher list, but
+simply keeps all the 1.3 suites it supports enabled at all times.
 
 Signed-off-by: Karsten Sperling <ksperling@apple.com>
 ---
- src/crypto/tls_openssl.c | 125 ++++++++++++++++++++++++++++++++++++---
- 1 file changed, 118 insertions(+), 7 deletions(-)
+ hostapd/hostapd.conf               |   5 ++
+ src/crypto/tls_openssl.c           | 124 +++++++++++++++++++++++++++--
+ tests/hwsim/test_ap_eap.py         |  29 +++++++
+ wpa_supplicant/wpa_supplicant.conf |   6 ++
+ 4 files changed, 157 insertions(+), 7 deletions(-)
 
+diff --git a/hostapd/hostapd.conf b/hostapd/hostapd.conf
+index 338a16c82..c9fe0d31f 100644
+--- a/hostapd/hostapd.conf
++++ b/hostapd/hostapd.conf
+@@ -1417,6 +1417,11 @@ eap_server=0
+ # See https://www.openssl.org/docs/apps/ciphers.html for OpenSSL documentation
+ # on cipher suite configuration. This is applicable only if hostapd is built to
+ # use OpenSSL.
++# TLSv1.3 cipher suite names (e.g. "TLS_AES_256_GCM_SHA384") may also be
++# included in the list; in this case they replace the default set of TLSv1.3
++# suites that OpenSSL would otherwise enable. (There is no corresponding
++# logic for TLSv1.2 and earlier ciphers: if none are listed, none are enabled.)
++# Note that using TLSv1.3 also requires [ENABLE-TLSv1.3] in tls_flags.
+ #openssl_ciphers=DEFAULT:!EXP:!LOW
+ 
+ # OpenSSL ECDH curves
 diff --git a/src/crypto/tls_openssl.c b/src/crypto/tls_openssl.c
-index eab43df39..7a057bfc4 100644
+index eab43df39..eb36797c8 100644
 --- a/src/crypto/tls_openssl.c
 +++ b/src/crypto/tls_openssl.c
-@@ -123,6 +123,117 @@ static size_t SSL_SESSION_get_master_key(const SSL_SESSION *session,
+@@ -123,6 +123,116 @@ static size_t SSL_SESSION_get_master_key(const SSL_SESSION *session,
  
  #endif
  
 +
-+#if (OPENSSL_VERSION_NUMBER >= 0x10101000L) && !defined(OPENSSL_IS_BORINGSSL)
++#if (OPENSSL_VERSION_NUMBER >= 0x10101000L) && \
++	!defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_IS_BORINGSSL)
 +/*
 + * OpenSSL has introduced a separate API for TLS 1.3 cipher suites distinct
 + * from the API that configures ciphers for TLS versions <=1.2, whereas other
-+ * implementations (e.g. wolfSSL) kept a single API.
++ * implementations (e.g. wolfSSL, LibreSSL, and BoringSSL) kept a single API.
 + *
 + * Provide a shim that separates a combined list into TLS 1.3 cipher suites
 + * (they all start with "TLS_"), and pre-1.3 ciphers. If the list contains no
 + * TLS 1.3 cipher suites, the existing suites are left untouched (matching
 + * current / desired behavior), but if there are no pre-1.3 ciphers that list
 + * is explicitly cleared. This allows for TLS 1.3-only configurations.
++ *
++ * Exactly one of ctx and ssl must be passed; this is handled by the wrapper
++ * macros tls_{ctx,ssl}_set_ciphers defined below.
 + */
-+static int _set_cipher_list_and_suites(void *ssl, char const *combined,
-+				       int (*set_cipher_list)(void *, char const *),
-+				       int (*set_ciphersuites)(void *, char const *))
++static int tls_set_ciphers(SSL_CTX *ctx, SSL *ssl, const char *combined)
 +{
-+	int success = 1;
++	int success = 0;
 +	char *ciphers = NULL, *ciphers_end;
 +	char *suites = NULL, *suites_end;
 +	int len = os_strlen(combined);
-+	char const *combined_end = combined + len;
 +
 +	ciphers = os_malloc(len + 1);
 +	suites = os_malloc(len + 1);
-+	if (!ciphers || !suites) {
-+		success = 0;
++	if (!ciphers || !suites)
 +		goto done;
-+	}
 +
 +	ciphers_end = ciphers;
 +	suites_end = suites;
-+	while (combined < combined_end) {
-+		char const *sep = os_strchr(combined, ':');
-+		len = (sep ? sep : combined_end) - combined;
++	for (;;) {
++		const char *sep = combined;
++		/* OpenSSL accepts ',' and ' ' in addition to ':' */
++		while (*sep && *sep != ':' && *sep != ',' && *sep != ' ')
++			sep++;
++		len = sep - combined;
 +		if (os_strncmp(combined, "TLS_", 4) == 0) {
 +			os_memcpy(suites_end, combined, len);
 +			suites_end += len;
 +			*suites_end++ = ':';
-+		} else {
++		} else if (len > 0) {
 +			os_memcpy(ciphers_end, combined, len);
 +			ciphers_end += len;
 +			*ciphers_end++ = ':';
 +		}
-+		if (!sep)
++		if (!*sep)
 +			break;
-+		combined += len + 1;
++		combined = sep + 1;
 +	}
++
++	/* Reject an empty combined list outright. */
++	if (ciphers == ciphers_end && suites == suites_end)
++		goto done;
 +
 +	if (ciphers_end > ciphers) {
 +		*--ciphers_end = '\0';
 +		wpa_printf(MSG_DEBUG,
 +			   "OpenSSL: setting cipher_list '%s'",
 +			   ciphers);
-+		success = set_cipher_list(ssl, ciphers);
 +	} else {
++		*ciphers = '\0';
 +		wpa_printf(MSG_DEBUG, "OpenSSL: clearing cipher_list");
-+		if (!set_cipher_list(ssl, "")) {
-+			/* Passing an empty string clears the pre-1.3 cipher
-+			 * list as intended, but SSL[_CTX]_set_cipher_list()
-+			 * reports the fact that no cipher was selected as
-+			 * SSL_R_NO_CIPHER_MATCH. Treat this specific error as
-+			 * a success. */
-+			unsigned long err = ERR_peek_error();
-+			if (ERR_GET_LIB(err) == ERR_LIB_SSL &&
-+			    ERR_GET_REASON(err) == SSL_R_NO_CIPHER_MATCH) {
-+				(void) ERR_get_error(); /* consume the error */
-+			} else {
-+				success = 0;
-+				goto done;
-+			}
-+		}
++	}
++	success = (ctx != NULL)
++		? SSL_CTX_set_cipher_list(ctx, ciphers)
++		: SSL_set_cipher_list(ssl, ciphers);
++	if (ciphers == ciphers_end && !success) {
++		/* Passing an empty string clears the pre-1.3 cipher list as
++		 * intended, but SSL[_CTX]_set_cipher_list() reports the fact
++		 * that no cipher was selected as SSL_R_NO_CIPHER_MATCH. Treat
++		 * this specific error as a success. */
++		unsigned long err = ERR_peek_last_error();
++		if (ERR_GET_LIB(err) != ERR_LIB_SSL ||
++		    ERR_GET_REASON(err) != SSL_R_NO_CIPHER_MATCH)
++			goto done;
++		ERR_clear_error();
++		success = 1;
++	} else if (!success) {
++		goto done;
 +	}
 +
-+	if (success && suites_end > suites) {
++	if (suites_end > suites) {
 +		*--suites_end = '\0';
 +		wpa_printf(MSG_DEBUG,
 +			   "OpenSSL: setting ciphersuites '%s'",
 +			   suites);
-+		success = set_ciphersuites(ssl, suites);
++		success = (ctx != NULL)
++			? SSL_CTX_set_ciphersuites(ctx, suites)
++			: SSL_set_ciphersuites(ssl, suites);
 +	}
 +
 +done:
@@ -123,95 +154,141 @@ index eab43df39..7a057bfc4 100644
 +	return success;
 +}
 +
-+static inline int SSL_CTX_set_cipher_list_and_ciphersuites(SSL_CTX *ctx,
-+							   const char *combined)
-+{
-+	return _set_cipher_list_and_suites(ctx, combined,
-+					   (int (*)(void *, char const *))SSL_CTX_set_cipher_list,
-+					   (int (*)(void *, char const *))SSL_CTX_set_ciphersuites);
-+}
-+
-+static inline int SSL_set_cipher_list_and_ciphersuites(SSL *ssl,
-+						       const char *combined)
-+{
-+	return _set_cipher_list_and_suites(ssl, combined,
-+					   (int (*)(void *, char const *))SSL_set_cipher_list,
-+					   (int (*)(void *, char const *))SSL_set_ciphersuites);
-+}
-+#else /* >= 1.1.1 and !OPENSSL_IS_BORINGSSL */
-+#define SSL_CTX_set_cipher_list_and_ciphersuites(ctx, ciphers) \
++#define tls_ctx_set_ciphers(ctx, ciphers) \
++	tls_set_ciphers(ctx, NULL, ciphers)
++#define tls_ssl_set_ciphers(ssl, ciphers) \
++	tls_set_ciphers(NULL, ssl, ciphers)
++#else /* >= 1.1.1 and !LIBRESSL_VERSION_NUMBER and !OPENSSL_IS_BORINGSSL */
++#define tls_ctx_set_ciphers(ctx, ciphers) \
 +	SSL_CTX_set_cipher_list(ctx, ciphers)
-+#define SSL_set_cipher_list_and_ciphersuites(ssl, ciphers) \
++#define tls_ssl_set_ciphers(ssl, ciphers) \
 +	SSL_set_cipher_list(ssl, ciphers)
-+#endif /* >= 1.1.1 and !OPENSSL_IS_BORINGSSL */
++#endif /* >= 1.1.1 and !LIBRESSL_VERSION_NUMBER and !OPENSSL_IS_BORINGSSL */
 +
 +
  #if OPENSSL_VERSION_NUMBER < 0x10100000L
  static const unsigned char * ASN1_STRING_get0_data(const ASN1_STRING *x)
  {
-@@ -1322,7 +1433,7 @@ void * tls_init(const struct tls_config *conf)
+@@ -1322,7 +1432,7 @@ void * tls_init(const struct tls_config *conf)
  		ciphers = conf->openssl_ciphers;
  	else
  		ciphers = TLS_DEFAULT_CIPHERS;
 -	if (SSL_CTX_set_cipher_list(ssl, ciphers) != 1) {
-+	if (SSL_CTX_set_cipher_list_and_ciphersuites(ssl, ciphers) != 1) {
++	if (tls_ctx_set_ciphers(ssl, ciphers) != 1) {
  		wpa_printf(MSG_ERROR,
  			   "OpenSSL: Failed to set cipher string '%s'",
  			   ciphers);
-@@ -3374,7 +3485,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3374,7 +3484,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  				   openssl_ciphers);
  			ciphers = openssl_ciphers;
  		}
 -		if (SSL_set_cipher_list(ssl, ciphers) != 1) {
-+		if (SSL_set_cipher_list_and_ciphersuites(ssl, ciphers) != 1) {
++		if (tls_ssl_set_ciphers(ssl, ciphers) != 1) {
  			wpa_printf(MSG_INFO,
  				   "OpenSSL: Failed to set Suite B ciphers");
  			return -1;
-@@ -3393,7 +3504,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3393,7 +3503,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  				   openssl_ciphers);
  			ciphers = openssl_ciphers;
  		}
 -		if (SSL_set_cipher_list(ssl, ciphers) != 1) {
-+		if (SSL_set_cipher_list_and_ciphersuites(ssl, ciphers) != 1) {
++		if (tls_ssl_set_ciphers(ssl, ciphers) != 1) {
  			wpa_printf(MSG_INFO,
  				   "OpenSSL: Failed to set Suite B ciphers");
  			return -1;
-@@ -3481,7 +3592,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3481,7 +3591,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  	}
  #else /* OPENSSL_IS_BORINGSSL */
  	if (!(flags & (TLS_CONN_SUITEB | TLS_CONN_SUITEB_NO_ECDH)) &&
 -	    openssl_ciphers && SSL_set_cipher_list(ssl, openssl_ciphers) != 1) {
-+	    openssl_ciphers && SSL_set_cipher_list_and_ciphersuites(ssl, openssl_ciphers) != 1) {
++	    openssl_ciphers && tls_ssl_set_ciphers(ssl, openssl_ciphers) != 1) {
  		wpa_printf(MSG_INFO,
  			   "OpenSSL: Failed to set openssl_ciphers '%s'",
  			   openssl_ciphers);
-@@ -3489,7 +3600,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
+@@ -3489,7 +3599,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
  	}
  #endif /* OPENSSL_IS_BORINGSSL */
  #else /* CONFIG_SUITEB */
 -	if (openssl_ciphers && SSL_set_cipher_list(ssl, openssl_ciphers) != 1) {
-+	if (openssl_ciphers && SSL_set_cipher_list_and_ciphersuites(ssl, openssl_ciphers) != 1) {
++	if (openssl_ciphers && tls_ssl_set_ciphers(ssl, openssl_ciphers) != 1) {
  		wpa_printf(MSG_INFO,
  			   "OpenSSL: Failed to set openssl_ciphers '%s'",
  			   openssl_ciphers);
-@@ -5658,7 +5769,7 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
+@@ -5658,7 +5768,7 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
  	}
  #endif /* OPENSSL_IS_BORINGSSL */
  #endif /* CONFIG_SUITEB */
 -	if (ciphers && SSL_set_cipher_list(conn->ssl, ciphers) != 1) {
-+	if (ciphers && SSL_set_cipher_list_and_ciphersuites(conn->ssl, ciphers) != 1) {
++	if (ciphers && tls_ssl_set_ciphers(conn->ssl, ciphers) != 1) {
  		wpa_printf(MSG_INFO,
  			   "OpenSSL: Failed to set cipher string '%s'",
  			   ciphers);
-@@ -5885,7 +5996,7 @@ int tls_global_set_params(void *tls_ctx,
+@@ -5885,7 +5995,7 @@ int tls_global_set_params(void *tls_ctx,
  		data->openssl_ciphers = NULL;
  	}
  	if (params->openssl_ciphers &&
 -	    SSL_CTX_set_cipher_list(ssl_ctx, params->openssl_ciphers) != 1) {
-+	    SSL_CTX_set_cipher_list_and_ciphersuites(ssl_ctx, params->openssl_ciphers) != 1) {
++	    tls_ctx_set_ciphers(ssl_ctx, params->openssl_ciphers) != 1) {
  		wpa_printf(MSG_INFO,
  			   "OpenSSL: Failed to set cipher string '%s'",
  			   params->openssl_ciphers);
+diff --git a/tests/hwsim/test_ap_eap.py b/tests/hwsim/test_ap_eap.py
+index 756d3b1e3..2852d8208 100644
+--- a/tests/hwsim/test_ap_eap.py
++++ b/tests/hwsim/test_ap_eap.py
+@@ -6371,6 +6371,35 @@ def test_ap_wpa2_eap_tls_13_fragmentation(dev, apdev):
+                      phase1="tls_disable_tlsv1_0=1 tls_disable_tlsv1_1=1 tls_disable_tlsv1_2=1 tls_disable_tlsv1_3=0",
+                      fragment_size="100")
+ 
++def test_ap_wpa2_eap_tls_13_openssl_ciphers_only_13(dev, apdev):
++    """EAP-TLS with only TLSv1.3 ciphers in openssl_ciphers"""
++    params = int_eap_server_params()
++    params['tls_flags'] = '[ENABLE-TLSv1.2][ENABLE-TLSv1.3]'
++    params['openssl_ciphers'] = 'TLS_AES_128_GCM_SHA256'
++    hapd = hostapd.add_ap(apdev[0], params)
++    check_tls13_support(hapd)
++
++    check_tls13_support(dev[0])
++    # TLSv1.2-only client should fail, only TLSv1.3 ciphers available
++    id = eap_connect(dev[0], hapd, "TLS", "tls user",
++                     ca_cert="auth_serv/ca.pem",
++                     client_cert="auth_serv/user.pem",
++                     private_key="auth_serv/user.key",
++                     phase1="tls_disable_tlsv1_0=1 tls_disable_tlsv1_1=1 tls_disable_tlsv1_2=0 tls_disable_tlsv1_3=1",
++                     expect_failure=True, local_error_report=True)
++    dev[0].request("REMOVE_NETWORK all")
++    dev[0].dump_monitor()
++    # TLVv1.2 / TLSv1.3 client should succeed
++    id = eap_connect(dev[0], hapd, "TLS", "tls user",
++                     ca_cert="auth_serv/ca.pem",
++                     client_cert="auth_serv/user.pem",
++                     private_key="auth_serv/user.key",
++                     phase1="tls_disable_tlsv1_0=1 tls_disable_tlsv1_1=1 tls_disable_tlsv1_2=0 tls_disable_tlsv1_3=0")
++    if dev[0].get_status_field("eap_tls_version") != "TLSv1.3":
++        raise Exception("Unexpected TLS version")
++    if dev[0].get_status_field('EAP TLS cipher') != params['openssl_ciphers']:
++        raise Exception("Unexpected TLS cipher")
++
+ def test_ap_wpa2_eap_ttls_13(dev, apdev):
+     """EAP-TTLS and TLS 1.3"""
+     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index f7852293b..4ce8cae3b 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -188,6 +188,12 @@ fast_reauth=1
+ # See https://www.openssl.org/docs/apps/ciphers.html for OpenSSL documentation
+ # on cipher suite configuration. This is applicable only if wpa_supplicant is
+ # built to use OpenSSL.
++# TLSv1.3 cipher suite names (e.g. "TLS_AES_256_GCM_SHA384") may also be
++# included in the list; in this case they replace the default set of TLSv1.3
++# suites that OpenSSL would otherwise enable. (There is no corresponding
++# logic for TLSv1.2 and earlier ciphers: if none are listed, none are enabled.)
++# Note that using TLSv1.3 also requires tls_disable_tlsv1_3=0 in the network's
++# phase1 parameter.
+ #openssl_ciphers=DEFAULT:!EXP:!LOW
+ 
+ # Dynamic EAP methods
 -- 
 2.50.1 (Apple Git-155)
 
