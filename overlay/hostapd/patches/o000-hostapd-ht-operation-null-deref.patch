@@ -1,0 +1,46 @@
+From 0e275f281a19e3175fd02335145600e338b378c5 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 29 Jul 2026 19:21:36 +1200
+Subject: [PATCH] hostapd: Fix NULL deref in hostapd_eid_ht_operation
+
+hapd->iface->current_mode is NULL whenever hostapd runs without hw
+feature data, which is not an error:
+hostapd_setup_interface_complete_sync() continues when
+hostapd_get_hw_features() fails (commented "Not all drivers support this
+yet, so continue without hw feature data"), skipping the
+hostapd_select_hw_mode() block that would set current_mode. Interface
+setup then proceeds to hostapd_start_beacon() and builds the beacon IEs
+anyway. This is why hostapd_eid_erp_info(),
+hostapd_dfs_start_channel_switch() and many other call sites all check
+current_mode before dereferencing it.
+
+Reaching it requires ieee80211n=1 (the function returns early otherwise)
+together with no hw feature data, i.e. driver=none or any driver whose
+get_hw_feature_data fails.
+
+Treat an absent current_mode as advertising no VHT capabilities, which
+leaves the resulting HT Operation element identical to what upstream
+emitted before the Extended NSS BW check was introduced.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/ap/ieee802_11_ht.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/ap/ieee802_11_ht.c b/src/ap/ieee802_11_ht.c
+index 77b7907e7..47e9ea390 100644
+--- a/src/ap/ieee802_11_ht.c
++++ b/src/ap/ieee802_11_ht.c
+@@ -145,7 +145,8 @@ u8 * hostapd_eid_ht_operation(struct hostapd_data *hapd, u8 *eid)
+ 	oper->operation_mode = host_to_le16(hapd->iface->ht_op_mode);
+ 	set_ht_param(hapd, oper);
+ 
+-	vht_capabilities_info = host_to_le32(hapd->iface->current_mode->vht_capab);
++	vht_capabilities_info = host_to_le32(hapd->iface->current_mode ?
++					     hapd->iface->current_mode->vht_capab : 0);
+ 	chwidth = hostapd_get_oper_chwidth(hapd->iconf);
+ 	if (vht_capabilities_info & VHT_CAP_EXTENDED_NSS_BW_SUPPORT
+ 		&& ((chwidth == CHANWIDTH_160MHZ) || (chwidth == CHANWIDTH_80P80MHZ))) {
+-- 
+2.50.1 (Apple Git-155)
+

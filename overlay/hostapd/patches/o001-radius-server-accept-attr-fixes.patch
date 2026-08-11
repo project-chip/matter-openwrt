@@ -1,0 +1,64 @@
+From 8a3ff9d9f228a40de81d2b91ac77beef7265aea8 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Sun, 9 Aug 2026 02:25:05 +1200
+Subject: [PATCH] RADIUS server: Fix accept_attr leak, allocation size and NULL
+ handling
+
+radius_server_get_eap_user() is the get_eap_user callback, so it runs
+for every EAP user lookup and reassigns sess->accept_attr each time,
+leaking the previous copy; only the last one was released by
+radius_server_session_free(). Free the old copy before replacing it.
+
+radius_server_copy_attr() sized its allocation with the type of the
+source struct rather than the destination struct. The two happen to be
+laid out such that the source type is the larger one, so this
+over-allocated instead of overflowing, but it is not what was intended.
+
+An allocation failure in radius_server_copy_attr() was not handled by
+its callers, leaving sess->accept_attr NULL, which the loops that build
+an Access-Accept would then dereference. Handle this by failing the
+session.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/radius/radius_server.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/radius/radius_server.c b/src/radius/radius_server.c
+index 44b4312e3..23d9a9333 100644
+--- a/src/radius/radius_server.c
++++ b/src/radius/radius_server.c
+@@ -554,7 +554,7 @@ radius_server_copy_attr(const struct hostapd_radius_attr *data)
+ 		data_size += wpabuf_len(attr->val);
+ 	}
+ 
+-	attr_new = os_zalloc(n_attr * sizeof(*attr) + data_size);
++	attr_new = os_zalloc(n_attr * sizeof(*attr_new) + data_size);
+ 	if (!attr_new)
+ 		return NULL;
+ 
+@@ -626,6 +626,10 @@ radius_server_get_new_session(struct radius_server_data *data,
+ 	sess->accept_attr = radius_server_copy_attr(tmp->accept_attr);
+ 	sess->macacl = tmp->macacl;
+ 	eap_user_free(tmp);
++	if (sess->accept_attr == NULL) {
++		radius_server_session_remove(data, sess);
++		return NULL;
++	}
+ 
+ 	sess->username = os_malloc(user_len * 4 + 1);
+ 	if (sess->username == NULL) {
+@@ -2370,7 +2374,10 @@ static int radius_server_get_eap_user(void *ctx, const u8 *identity,
+ 	ret = data->get_eap_user(data->conf_ctx, identity, identity_len,
+ 				 phase2, user);
+ 	if (ret == 0 && user) {
++		os_free(sess->accept_attr);
+ 		sess->accept_attr = radius_server_copy_attr(user->accept_attr);
++		if (sess->accept_attr == NULL)
++			return -1;
+ 		sess->macacl = user->macacl;
+ 		sess->t_c_timestamp = user->t_c_timestamp;
+ 	}
+-- 
+2.50.1 (Apple Git-155)
+
