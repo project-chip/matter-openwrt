@@ -1,0 +1,103 @@
+From 6ad474677a58fa7122c253905beb270c8b9093e7 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 22 Jul 2026 21:37:40 +1200
+Subject: [PATCH] Add missing ucode / ubus compile guards
+
+This makes it possible to build standalone binaries for hwsim testing
+that don't have runtime dependencies on ucode or ubus.
+
+Also fix the guards for some symbols that were narrowed incorrectly by
+252-disable_ctrl_iface_mib.patch, those functions should not be
+conditional on CONFIG_CTRL_IFACE_MIB.
+---
+ hostapd/Makefile        | 9 +++++++++
+ hostapd/main.c          | 4 +++-
+ wpa_supplicant/Makefile | 3 +++
+ wpa_supplicant/ap.c     | 4 ++++
+ 4 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/hostapd/Makefile b/hostapd/Makefile
+index 28ed8e16c..c277d070a 100644
+--- a/hostapd/Makefile
++++ b/hostapd/Makefile
+@@ -63,9 +63,15 @@ endif
+ OBJS += main.o
+ OBJS += config_file.o
+ 
++# The standalone RADIUS frontend depends on libubox (which is only pulled in
++# via NEED_ULOOP if CONFIG_UBUS or CONFIG_UCODE is enabled), and does not have
++# its own .config option. Enable it if CONFIG_UBUS || CONFIG_UCODE.
++ifneq ($(CONFIG_UBUS)$(CONFIG_UCODE),)
+ ifdef CONFIG_RADIUS_SERVER
++CFLAGS += -DRADIUS_SERVER_STANDALONE
+ OBJS += radius.o
+ endif
++endif
+ 
+ OBJS += ../src/ap/hostapd.o
+ OBJS += ../src/ap/wpa_auth_glue.o
+@@ -183,6 +189,9 @@ CFLAGS += -DUCODE_SUPPORT
+ OBJS += ../src/utils/ucode.o
+ OBJS += ../src/ap/ucode.o
+ NEED_ULOOP:=y
++else
++# Work around unguarded <ucode/*> includes in src/utils/ucode.h
++CFLAGS += -D__HOSTAPD_UTILS_UCODE_H
+ endif
+ 
+ ifdef NEED_ULOOP
+diff --git a/hostapd/main.c b/hostapd/main.c
+index c59c949cc..809db3879 100644
+--- a/hostapd/main.c
++++ b/hostapd/main.c
+@@ -40,7 +40,9 @@ struct hapd_global {
+ 
+ static struct hapd_global global;
+ 
++#ifdef RADIUS_SERVER_STANDALONE
+ extern int radius_main(int argc, char **argv);
++#endif
+ 
+ #ifndef CONFIG_NO_HOSTAPD_LOGGER
+ static void hostapd_logger_cb(void *ctx, const u8 *addr, unsigned int module,
+@@ -839,7 +841,7 @@ int main(int argc, char *argv[])
+ 	if (os_program_init())
+ 		return -1;
+ 
+-#ifdef RADIUS_SERVER
++#ifdef RADIUS_SERVER_STANDALONE
+ 	if (strstr(argv[0], "radius"))
+ 		return radius_main(argc, argv);
+ #endif
+diff --git a/wpa_supplicant/Makefile b/wpa_supplicant/Makefile
+index 0abb12292..8c5a3b8f3 100644
+--- a/wpa_supplicant/Makefile
++++ b/wpa_supplicant/Makefile
+@@ -197,6 +197,9 @@ OBJS += ../src/utils/ucode.o
+ OBJS += ../src/utils/uloop.o
+ OBJS += ucode.o
+ LIBS += -lubox
++else
++# Work around unguarded <ucode/*> includes in src/utils/ucode.h
++CFLAGS += -D__HOSTAPD_UTILS_UCODE_H
+ endif
+ 
+ ifdef CONFIG_CODE_COVERAGE
+diff --git a/wpa_supplicant/ap.c b/wpa_supplicant/ap.c
+index ed96e0781..7716c8857 100644
+--- a/wpa_supplicant/ap.c
++++ b/wpa_supplicant/ap.c
+@@ -1661,6 +1661,10 @@ int ap_ctrl_iface_bss_tm_req(struct wpa_supplicant *wpa_s, const char *buf)
+ 
+ #endif /* CONFIG_WNM_AP */
+ 
++#endif /* CONFIG_CTRL_IFACE && CONFIG_CTRL_IFACE_MIB */
++
++
++#ifdef CONFIG_CTRL_IFACE
+ 
+ int ap_ctrl_iface_acl_add_mac(struct wpa_supplicant *wpa_s,
+ 			      enum macaddr_acl acl_type,
+-- 
+2.50.1 (Apple Git-155)
+

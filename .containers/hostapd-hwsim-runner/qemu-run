@@ -1,9 +1,13 @@
 #!/bin/bash
 #
 # Run a command inside a qemu VM that shares the host's file system.
-# The shell command to run is given either as arguments or, if no
-# arguments are specified, is read as a script from stdin.
 #
+# The arguments are a command and its arguments, not a shell command string;
+# word boundaries are preserved as they would be by sudo or docker run, rather
+# than being re-split by a shell as they are by ssh.
+# If no arguments are given, a shell script is read from stdin instead. This
+# convenient when shell syntax is required, especially combined with << or <<<,
+# e.g. qemu-run <<<'test -e /dev/shm && echo yes'
 # The exit status of the command is propagated as the exit status of qemu-run.
 
 set -eu
@@ -58,13 +62,17 @@ trap cleanup EXIT
 	# init alive until it takes effect, since the kernel panics if pid 1 exits.
 	printf 'trap %q EXIT\n' \
 		'rc=$?; echo "$rc" >'"$JOB"'/rc; echo === >&2; echo o >/proc/sysrq-trigger; sleep 60'
-	# Emit the job body
+	# Emit the job body, in a subshell so that an exec in the job replaces that
+	# rather than init, which would discard the trap above. Bash resets the trap
+	# to its default in the subshell, so it stays owned by init alone. The no-op
+	# keeps the subshell valid even if the job turns out to be empty.
+	printf '( :\n'
 	if (( $# )); then
-		printf '%q ' "$@"
-		printf '\n'
+		printf ' %q' "$@"
 	else
 		cat
 	fi
+	printf '\n)\n'
 } >"$JOB/init"
 chmod 0755 "$JOB/init"
 
