@@ -1,0 +1,116 @@
+#!/bin/bash
+#
+# Run a command inside a qemu VM that shares the host's file system.
+# The shell command to run is given either as arguments or, if no
+# arguments are specified, is read as a script from stdin.
+#
+# The exit status of the command is propagated as the exit status of qemu-run.
+
+set -eu
+
+VM_MEMORY="${VM_MEMORY:-2048}"
+VM_CPUS="${VM_CPUS:-$(nproc)}"
+
+# Deliberately not under /tmp, which the tests use for their own purposes.
+JOB="$(mktemp -d -p /var/tmp)"
+
+# virtiofsd normally exits by itself once qemu disconnects, so the kill only
+# matters when we bail out before or during the qemu run. It has to tolerate the
+# process already being gone: under set -e a failure here would both skip the
+# rest of the cleanup and override the exit status we are trying to propagate.
+cleanup() {
+	[[ -z "${VFSD:-}" ]] || kill "$VFSD" 2>/dev/null || true
+	rm -rf -- "$JOB"
+}
+trap cleanup EXIT
+
+# Assemble the VM's init script
+{
+	# /run has to be a local file system, because the hostapd and wpa_supplicant
+	# control interfaces create unix sockets there. /dev has to be devtmpfs
+	# rather than the container's shared /dev, because mac80211_hwsim needs its
+	# own rfkill device nodes -- which in turn means /dev/shm and /dev/pts have
+	# to be mounted by hand, as devtmpfs provides neither. faketime needs the
+	# former: it passes the clock offset to child processes through a POSIX
+	# shared memory object.
+	printf '%s\n' \
+		'#!/bin/bash' \
+		'mount -t devtmpfs devtmpfs /dev' \
+		'exec </dev/console >/dev/console 2>&1' \
+		'mkdir -p /dev/shm /dev/pts' \
+		'mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm' \
+		'mount -t devpts -o gid=5,mode=620,ptmxmode=666 devpts /dev/pts' \
+		'mount -t proc proc /proc' \
+		'mount -t sysfs sysfs /sys' \
+		'mount -t debugfs debugfs /sys/kernel/debug' \
+		'mount -t tmpfs tmpfs /run' \
+		'ip link set lo up # some tests talk to 127.0.0.1' \
+		'export USER=root LOGNAME=root HOME=/root' \
+		'export debian_chroot=qemu' \
+		'echo 1 >/proc/sys/kernel/sysrq'
+	# Propagate a few values from the host
+	printf 'hostname %q\n' "$(hostname)"
+	printf 'export TERM=%q\n' "${TERM:-dumb}" # for an interactive shell
+	printf 'cd %q\n' "$PWD"
+	# Delimit the command's output from the kernel's boot/shutdown chatter.
+	printf 'echo === >&2\n'
+	# Transmit the exit status, then stop the VM using Sysrq. The sleep keeps
+	# init alive until it takes effect, since the kernel panics if pid 1 exits.
+	printf 'trap %q EXIT\n' \
+		'rc=$?; echo "$rc" >'"$JOB"'/rc; echo === >&2; echo o >/proc/sysrq-trigger; sleep 60'
+	# Emit the job body
+	if (( $# )); then
+		printf '%q ' "$@"
+		printf '\n'
+	else
+		cat
+	fi
+} >"$JOB/init"
+chmod 0755 "$JOB/init"
+
+# --sandbox=none because the default sandbox needs privileges the container does
+# not have, and would hide any volumes mounted into it. --announce-submounts
+# keeps inode numbers distinct across the several mounts that / spans.
+/usr/libexec/virtiofsd \
+	--socket-path="$JOB/vfs.sock" --shared-dir=/ \
+	--sandbox=none --seccomp=none --rlimit-nofile 0 \
+	--announce-submounts --cache=auto \
+	--log-level warn &
+VFSD=$!
+while kill -0 "$VFSD" 2>/dev/null && [[ ! -e "$JOB/vfs.sock" ]]; do sleep 0.05; done
+if [[ ! -e "$JOB/vfs.sock" ]]; then
+	echo "qemu-run: virtiofsd failed to start" >&2
+	exit 1
+fi
+
+# KVM is available on GitHub-hosted runners, but fall back to emulation so that
+# this also works elsewhere (much slower, and the tests are timing sensitive).
+if [[ -w /dev/kvm ]]; then
+	ACCEL=kvm CPU=host
+else
+	echo "qemu-run: /dev/kvm not available, falling back to emulation" >&2
+	ACCEL=tcg CPU=max
+fi
+
+# memory-backend=mem gives virtiofsd a shareable view of the guest's memory, as
+# vhost-user requires. No initrd is needed because the Debian kernel has
+# fuse/virtiofs and the virtio transports built in, and can mount a non-block
+# root filesystem by itself. -net none and -vga none drop devices the VM has no
+# use for, including the network card whose option ROM the BIOS would otherwise
+# probe for a boot image; sercon-port stops SeaBIOS writing its banner (and a
+# terminal reset) to the serial console, which it does because there is no VGA.
+qemu-system-x86_64 \
+	-machine "accel=$ACCEL,memory-backend=mem" -cpu "$CPU" \
+	-smp "$VM_CPUS" -m "$VM_MEMORY" \
+	-nographic -monitor none -no-reboot -net none -vga none \
+	-fw_cfg name=etc/sercon-port,string=0 \
+	-object memory-backend-memfd,id=mem,size="${VM_MEMORY}M",share=on \
+	-chardev socket,id=vfs,path="$JOB/vfs.sock" \
+	-device vhost-user-fs-pci,queue-size=1024,chardev=vfs,tag=rootfs \
+	-object rng-random,filename=/dev/urandom,id=rng0 \
+	-device virtio-rng-pci,rng=rng0 \
+	-kernel /boot/vmlinuz-qemu \
+	-append "quiet console=ttyS0 root=rootfs rootfstype=virtiofs rw mitigations=off panic=-1 init=$JOB/init"
+
+read -r <"$JOB/rc" 2>/dev/null || echo "qemu-run: failed to read job exit status" >&2
+exit "${REPLY:-127}"
