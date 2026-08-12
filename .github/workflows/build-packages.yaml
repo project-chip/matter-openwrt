@@ -22,7 +22,7 @@ jobs:
       - name: Build
         uses: addnab/docker-run-action@v3
         with:
-          image: ghcr.io/project-chip/matter-openwrt-build:25.12.4
+          image: ghcr.io/project-chip/matter-openwrt-build:25.12.5
           options: --volume ${{ github.workspace }}:/workspace --volume ${{ runner.temp }}/logs:/builder/logs
           shell: bash
           run: |
