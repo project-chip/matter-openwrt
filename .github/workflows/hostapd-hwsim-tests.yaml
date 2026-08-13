@@ -94,6 +94,10 @@ jobs:
           # around the expired pre-generated certificates used by some tests).
           qemu-run faketime 2026-01-01 ./run-all.sh 'ap_eap_tls_cert_pin*'
 
+      - name: Prepare test logs
+        if: always()
+        run: rm -f tests/hwsim/logs/current # symlink, would duplicate files in the zip
+
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v7
