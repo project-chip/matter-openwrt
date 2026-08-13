@@ -13,7 +13,7 @@ RUN set -eux; \
         binutils-dev libiberty-dev \
         libnl-3-dev libnl-genl-3-dev libnl-route-3-dev \
         libmbedtls-dev libssl-dev \
-        libsqlite3-dev libpcap-dev libxml2-dev libcurl4-openssl-dev \
+        libdbus-1-dev libsqlite3-dev libpcap-dev libxml2-dev libcurl4-openssl-dev \
         # test runtime
         python3 python3-pip \
         iproute2 iw bridge-utils net-tools \
@@ -25,8 +25,8 @@ RUN set -eux; \
     # avoids running any post-install hooks like initramfs generation.
     kpkg="$(apt-cache depends linux-image-amd64 | grep Depends | grep -o 'linux-image-.*')"; \
     cd /var/cache; apt-get download "$kpkg"; dpkg-deb -x linux-image-*.deb /; \
-    cd /boot; ln -s vmlinuz-* vmlinuz-qemu; \
     kver="$(ls /lib/modules)"; depmod "$kver"; \
+    cd /boot; ln -s "vmlinuz-$kver" vmlinuz-qemu; \
     # Clean up
     rm -rf /var/cache/linux-image-*.deb /var/lib/apt/lists/*
 

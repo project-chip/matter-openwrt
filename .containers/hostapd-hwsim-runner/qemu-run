@@ -120,5 +120,5 @@ qemu-system-x86_64 \
 	-kernel /boot/vmlinuz-qemu \
 	-append "quiet console=ttyS0 root=rootfs rootfstype=virtiofs rw mitigations=off panic=-1 init=$JOB/init"
 
-read -r <"$JOB/rc" 2>/dev/null || echo "qemu-run: failed to read job exit status" >&2
+read -r 2>/dev/null <"$JOB/rc" || echo "qemu-run: failed to read job exit status" >&2
 exit "${REPLY:-127}"

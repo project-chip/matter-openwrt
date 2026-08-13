@@ -1,4 +1,4 @@
-From 834427548fd37dc421898254d2de112c6fd461db Mon Sep 17 00:00:00 2001
+From 243f3cf72e775ec3a0d9ebac21424b1d12a36ad9 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 23 Jul 2026 13:31:14 +1200
 Subject: [PATCH] tests: Allow build.sh --force-config to override CONFIG_TLS
@@ -170,14 +170,14 @@ index 9606ce7eb..31bd6c739 100644
  CONFIG_PASN=y
  CONFIG_NAN_USD=y
 diff --git a/tests/hwsim/run-all.sh b/tests/hwsim/run-all.sh
-index 861c6af49..6e393dcd0 100755
+index 861c6af49..4fae491f2 100755
 --- a/tests/hwsim/run-all.sh
 +++ b/tests/hwsim/run-all.sh
 @@ -34,6 +34,7 @@ usage()
  {
  	echo "$0 [-v | --valgrind | valgrind] [-t | --trace | trace]"
  	echo "\t[-n <num> | --channels <num>] [-B | --build]"
-+	echo "\t[-f | --force-config[=<tls>|<ap-tls>/<sup-tls>]]"
++	echo "\t[--force-config[=<tls>|<ap-tls>/<sup-tls>]]"
  	echo "\t[-c | --codecov ] [run-tests.py parameters]"
  	exit 1
  }

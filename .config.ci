@@ -12,3 +12,4 @@ CONFIG_PACKAGE_openthread-br=m
 CONFIG_PACKAGE_openthread-rcp-nrf52840-mdk=m
 CONFIG_PACKAGE_wpad-mbedtls=m
 CONFIG_PACKAGE_wpad-openssl=m
+CONFIG_PACKAGE_wpad-wolfssl=m
