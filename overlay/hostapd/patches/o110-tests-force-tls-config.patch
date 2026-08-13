@@ -1,4 +1,4 @@
-From 243f3cf72e775ec3a0d9ebac21424b1d12a36ad9 Mon Sep 17 00:00:00 2001
+From 29e568ffb993798d9436003dc6c11f8c1985170e Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 23 Jul 2026 13:31:14 +1200
 Subject: [PATCH] tests: Allow build.sh --force-config to override CONFIG_TLS
@@ -119,7 +119,7 @@ index cb4700166..170581373 100755
  
  if [ $use_lcov -eq 1 ]; then
 diff --git a/tests/hwsim/example-hostapd.config b/tests/hwsim/example-hostapd.config
-index 383368bfd..58b07513b 100644
+index 20561a410..a2b526a27 100644
 --- a/tests/hwsim/example-hostapd.config
 +++ b/tests/hwsim/example-hostapd.config
 @@ -8,7 +8,7 @@ CONFIG_RSN_PREAUTH=y
@@ -131,7 +131,7 @@ index 383368bfd..58b07513b 100644
  
  CONFIG_EAP=y
  CONFIG_ERP=y
-@@ -112,9 +112,12 @@ CONFIG_TAXONOMY=y
+@@ -113,9 +113,12 @@ CONFIG_TAXONOMY=y
  CONFIG_FILS=y
  CONFIG_FILS_SK_PFS=y
  CONFIG_OWE=y
@@ -170,7 +170,7 @@ index 9606ce7eb..31bd6c739 100644
  CONFIG_PASN=y
  CONFIG_NAN_USD=y
 diff --git a/tests/hwsim/run-all.sh b/tests/hwsim/run-all.sh
-index 861c6af49..4fae491f2 100755
+index 507488041..8a6154ef0 100755
 --- a/tests/hwsim/run-all.sh
 +++ b/tests/hwsim/run-all.sh
 @@ -34,6 +34,7 @@ usage()
