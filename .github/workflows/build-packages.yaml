@@ -3,6 +3,11 @@ name: build matter packages
 on:
   pull_request:
   push:
+  workflow_dispatch:
+    inputs:
+      openwrt-version-override:
+        type: string
+        description: OpenWrt version number override
 
 jobs:
   build:
@@ -10,6 +15,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Determine OpenWrt version
+        uses: ./.github/actions/openwrt-version
+        with:
+          openwrt-version-override: ${{ inputs.openwrt-version-override }}
 
       - name: Prepare log directory
         run: |
@@ -22,11 +32,11 @@ jobs:
       - name: Build
         uses: addnab/docker-run-action@v3
         with:
-          image: ghcr.io/project-chip/matter-openwrt-build:25.12.5
+          image: ghcr.io/project-chip/matter-openwrt-build:${{ env.OPENWRT_VERSION }}
           options: --volume ${{ github.workspace }}:/workspace --volume ${{ runner.temp }}/logs:/builder/logs
           shell: bash
           run: |
-            set -x
+            set -eux
             echo "src-link --force matter /workspace" >>feeds.conf
             ./scripts/feeds update matter
             ./scripts/feeds install -a -p matter
