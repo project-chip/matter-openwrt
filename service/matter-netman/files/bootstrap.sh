@@ -54,7 +54,7 @@ matter_bootstrap() {
 	# create /etc/matter and /etc/matter/data if needed
 	if ! [ -d /etc/matter/data ]; then
 		if ! [ -d /etc/matter ]; then
-			mkdir -m 0750 /etc/matter
+			mkdir -m 0770 /etc/matter
 			chgrp matter /etc/matter
 		fi
 		mkdir -m 0700 /etc/matter/data
@@ -72,9 +72,9 @@ matter_bootstrap() {
 
 	# migration: /etc/matter used to be owned by matter
 	if ! [ -O /etc/matter ]; then
-		chmod 0400 /etc/matter/chip_factory.ini
+		chmod 0600 /etc/matter/chip_factory.ini
 		chown matter:matter /etc/matter/chip_factory.ini
-		chmod 0750 /etc/matter
+		chmod 0770 /etc/matter
 		chown root:matter /etc/matter
 	fi
 

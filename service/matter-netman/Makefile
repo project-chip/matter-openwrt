@@ -16,7 +16,8 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=matter-netman
 PKG_RELEASE:=2
-PKG_SOURCE_URL:=https://github.com/project-chip/connectedhomeip.git
+#PKG_SOURCE_URL:=ssh://git@code.cablelabs.com:7999/csa-matter/mirrors/connectedhomeip-staging.git
+PKG_SOURCE_URL:=file:///data/work/Mind/CableLabs/connectedhomeip
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_SUBMODULES:=\
   third_party/pigweed/repo \
@@ -25,12 +26,12 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2026-06-13
-PKG_SOURCE_VERSION:=b39eff6ed09e92344c3c6cc9a5a1b495a469bbfd
-PKG_MIRROR_HASH:=cc87d6df5cc945309bea4c810ba90081fa59dfaaa1daedf9fa199d17e3f313f8
+PKG_SOURCE_DATE:=2026-07-13
+PKG_SOURCE_VERSION:=07df5744961a3aee0908cab9b32a582fdb2e12d5 #b39eff6ed09e92344c3c6cc9a5a1b495a469bbfd
+PKG_MIRROR_HASH:=49ca8aca726d4b5a8e826e8c2ffad94ab26aef350a867415cf072dcd9292d13e #cc87d6df5cc945309bea4c810ba90081fa59dfaaa1daedf9fa199d17e3f313f8
 
 # Use local source dir for development
-# USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
+USE_SOURCE_DIR:=/data/work/Mind/CableLabs/connectedhomeip
 
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
@@ -49,7 +50,7 @@ define Package/matter-netman/default
   CATEGORY:=Network
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
-  DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter
+  DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter +rpcd
   USERID:=matter:matter
 endef
 
@@ -149,11 +150,12 @@ define Build/Compile
 endef
 
 define Package/matter-netman/default/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d $(1)/etc/config
 	$(INSTALL_BIN) $(OUT_DIR)/matter-network-manager-app $(1)/usr/sbin
 	$(INSTALL_DATA) ./files/bootstrap.sh $(1)/usr/share/matter/
 	$(INSTALL_DATA) ./files/matter_acl.json $(1)/usr/share/acl.d
 	$(INSTALL_BIN) ./files/matter.init $(1)/etc/init.d/matter
+	$(INSTALL_DATA) ./files/matter.config $(1)/etc/config/matter
 endef
 
 Package/matter-netman-mbedtls/install=$(Package/matter-netman/default/install)

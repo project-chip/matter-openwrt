@@ -1,10 +1,22 @@
 {
-	"user": "matter",
-	"access": {
-		"otbr": {
-			"methods": ["*"]
-		}
-	},
-	"subscribe": [ "otbr" ],
-	"listen": [ "ubus.object.*" ]
+    "user": "matter",
+    "access": {
+        "otbr": {
+            "methods": ["*"]
+        },
+        "uci": {
+            "methods": [
+                "get",
+                "set",
+                "commit"
+            ]
+        },
+        "service": {
+            "methods": [
+                "list"
+            ]
+        }
+    },
+    "subscribe": [ "otbr", "uci", "service" ],
+    "listen": [ "ubus.object.*", "uci", "network.interface" ]
 }
