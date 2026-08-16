@@ -49,7 +49,7 @@ define Package/matter-netman/default
   CATEGORY:=Network
   TITLE:=Matter Network Infrastructure Manager Daemon
   URL:=https://github.com/project-chip/connectedhomeip
-  DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter
+  DEPENDS:=+libstdcpp +libatomic +libubus +libubox +jsonfilter +rpcd
   USERID:=matter:matter
 endef
 
