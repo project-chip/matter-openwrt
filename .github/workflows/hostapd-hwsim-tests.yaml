@@ -1,0 +1,108 @@
+name: hostapd hwsim tests
+
+on:
+  pull_request:
+    paths:
+      - .containers/matter-openwrt-build/Dockerfile # OPENWRT_VERSION
+      - .github/workflows/hostapd-hwsim-tests.yaml
+      - include/overlay*
+      - overlay/hostapd/**
+  push:
+  workflow_dispatch:
+    inputs:
+      openwrt-version-override:
+        type: string
+        description: OpenWrt version number override
+      runner-version-override:
+        type: string
+        description: hwsim runner version override
+
+jobs:
+  prepare-source:
+    # Prepare a patched hostapd source tree via the OpenWrt SDK and package it.
+    # This ensures the code that is tested matches what is built on OpenWrt.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Determine OpenWrt version
+        uses: ./.github/actions/openwrt-version
+        with:
+          openwrt-version-override: ${{ inputs.openwrt-version-override }}
+
+      - name: Prepare output directory
+        run: chmod a+w ${{ runner.temp }}
+
+      # As in build-packages.yaml, only this step runs in the container, because
+      # the buildbot user owning the SDK does not match the runner's user.
+      - name: Prepare hostapd source
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ghcr.io/project-chip/matter-openwrt-build:${{ env.OPENWRT_VERSION }}
+          options: --volume ${{ github.workspace }}:/workspace --volume ${{ runner.temp }}:/out
+          shell: bash
+          run: |
+            set -eux; shopt -s nullglob
+            echo "src-link --force matter /workspace" >>feeds.conf
+            ./scripts/feeds update matter
+            ./scripts/feeds install -a -p matter
+            # Select any single hostapd variant, source prep is uniform across variants.
+            printf '%s\n' CONFIG_ALL=n CONFIG_PACKAGE_wpad=y >.config
+            make defconfig
+            make package/hostapd/prepare V=s
+            src=(build_dir/target-*/hostapd-*/hostapd-*)
+            test "${#src[@]}" -gt 0
+            tar -C "$(dirname "${src[0]}")" -czf /out/hostapd-src.tar.gz "$(basename "${src[0]}")"
+
+      - name: Upload hostapd source
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ runner.temp }}/hostapd-src.tar.gz
+          archive: false
+          retention-days: 1
+
+  build-and-test:
+    # Build hostapd/wpa_supplicant from the prepared source tree and run hwsim
+    # tests under qemu. Running under qemu is necessary because hosted GitHub
+    # runners do not have the mac80211_hwsim module available.
+    needs: prepare-source
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/project-chip/hostapd-hwsim-runner:${{ inputs.runner-version-override || 'latest' }}
+      options: --device /dev/kvm # enable KVM acceleration in qemu
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tls: [openssl, mbedtls, wolfssl]
+    steps:
+      - name: Download hostapd source
+        uses: actions/download-artifact@v8
+        with:
+          name: hostapd-src.tar.gz
+          path: ${{ runner.temp }}
+
+      - name: Build and test
+        timeout-minutes: 20
+        run: |
+          set -eux
+          tar -xf "$RUNNER_TEMP/hostapd-src.tar.gz" --strip-components=1
+          cd tests/hwsim
+          ./build.sh --force-config=${{ matrix.tls }}
+          # Run tests under qemu (for mac80211_hwsim) and with faketime (to work
+          # around the expired pre-generated certificates used by some tests).
+          qemu-run faketime 2026-01-01 ./run-all.sh 'ap_eap_tls_cert_pin*'
+
+      - name: Prepare test logs
+        if: always()
+        run: rm -f tests/hwsim/logs/current # symlink, would duplicate files in the zip
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hwsim-logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.tls }}
+          path: tests/hwsim/logs
+          if-no-files-found: warn
+          retention-days: 14

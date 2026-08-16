@@ -1,0 +1,211 @@
+From 29e568ffb993798d9436003dc6c11f8c1985170e Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Thu, 23 Jul 2026 13:31:14 +1200
+Subject: [PATCH] tests: Allow build.sh --force-config to override CONFIG_TLS
+
+E.g. `build.sh --force-config=wolfssl` will re-install the example
+configs but prepends CONFIG_TLS=wolfssl. The example configs have been
+modified to not set CONFIG_TLS directly anymore; the Makefiles already
+carry the openssl default.
+
+Different backends can be specified for hostapd and wpa_supplicant by
+separating them with "/", e.g. `build.sh --force-config=wolfssl/openssl`
+will build hostapd with wolfSSL and wpa_supplicant with OpenSSL.
+
+The --force-config argument can also be passed to run-all.sh, and will
+be forwarded to build.sh.
+
+Also disable DPP in the example configs when using wolfSSL, since the
+necessary hpke_* functions are not implemented in that backend.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ tests/hwsim/build.sh                      | 49 +++++++++++++++++++----
+ tests/hwsim/example-hostapd.config        |  5 ++-
+ tests/hwsim/example-wpa_supplicant.config |  5 ++-
+ tests/hwsim/run-all.sh                    | 15 ++++++-
+ 4 files changed, 64 insertions(+), 10 deletions(-)
+
+diff --git a/tests/hwsim/build.sh b/tests/hwsim/build.sh
+index cb4700166..170581373 100755
+--- a/tests/hwsim/build.sh
++++ b/tests/hwsim/build.sh
+@@ -6,12 +6,33 @@ cd $(dirname $0)
+ 
+ usage()
+ {
+-	echo "$0 [-c | --codecov] [-f | --force-config]"
++	echo "$0 [-c | --codecov] [-f | --force-config[=<tls>|<ap-tls>/<sup-tls>]]"
+ 	exit 1
+ }
+ 
++# Re-derive $2 (hostapd/.config or wpa_supplicant/.config) from $1
++# (the example config), optionally overriding CONFIG_TLS to $3
++sync_config()
++{
++	example="$1"
++	config="$2"
++	tls="$3"
++
++	tmp="$(mktemp)"
++	{
++		[ -n "$tls" ] && echo "CONFIG_TLS=$tls"
++		cat "$example"
++	} >"$tmp"
++
++	if [ ! -e "$config" ] || ! cmp "$tmp" "$config" >/dev/null 2>&1; then
++		cp "$tmp" "$config"
++	fi
++	rm -f "$tmp"
++}
++
+ use_lcov=0
+ force_config=0
++force_tls=""
+ while [ "$1" != "" ]; do
+ 	case $1 in
+ 		-c | --codecov ) shift
+@@ -20,12 +41,30 @@ while [ "$1" != "" ]; do
+ 			;;
+ 		-f | --force-config ) shift
+ 			force_config=1
++			force_tls=""
+ 			echo "$0: force copy config specified"
+ 			;;
++		--force-config=* )
++			force_config=1
++			force_tls=${1#--force-config=}
++			shift
++			echo "$0: force copy config specified (TLS backend: $force_tls)"
++			;;
+ 		* ) usage
+ 	esac
+ done
+ 
++case $force_tls in
++	*/*)
++		ap_tls=${force_tls%%/*}
++		sup_tls=${force_tls#*/}
++		;;
++	* )
++		ap_tls=$force_tls
++		sup_tls=$force_tls
++		;;
++esac
++
+ JOBS=`nproc`
+ if [ -z "$ABC" ]; then
+     JOBS=8
+@@ -46,9 +85,7 @@ make QUIET=1 CONFIG_NO_BROWSER=1
+ echo "Building hostapd"
+ cd ../../hostapd
+ if [ ! -e .config -o $force_config -eq 1 ]; then
+-    if ! cmp ../tests/hwsim/example-hostapd.config .config >/dev/null 2>&1 ; then
+-      cp ../tests/hwsim/example-hostapd.config .config
+-    fi
++    sync_config ../tests/hwsim/example-hostapd.config .config "$ap_tls"
+ fi
+ 
+ if [ $use_lcov -eq 1 ]; then
+@@ -64,9 +101,7 @@ make QUIET=1 -j$JOBS hostapd hostapd_cli hlr_auc_gw
+ echo "Building wpa_supplicant"
+ cd ../wpa_supplicant
+ if [ ! -e .config -o $force_config -eq 1 ]; then
+-    if ! cmp ../tests/hwsim/example-wpa_supplicant.config .config >/dev/null 2>&1 ; then
+-      cp ../tests/hwsim/example-wpa_supplicant.config .config
+-    fi
++    sync_config ../tests/hwsim/example-wpa_supplicant.config .config "$sup_tls"
+ fi
+ 
+ if [ $use_lcov -eq 1 ]; then
+diff --git a/tests/hwsim/example-hostapd.config b/tests/hwsim/example-hostapd.config
+index 20561a410..a2b526a27 100644
+--- a/tests/hwsim/example-hostapd.config
++++ b/tests/hwsim/example-hostapd.config
+@@ -8,7 +8,7 @@ CONFIG_RSN_PREAUTH=y
+ #CONFIG_TLS=internal
+ #CONFIG_INTERNAL_LIBTOMMATH=y
+ #CONFIG_INTERNAL_LIBTOMMATH_FAST=y
+-CONFIG_TLS=openssl
++#CONFIG_TLS=openssl
+ 
+ CONFIG_EAP=y
+ CONFIG_ERP=y
+@@ -113,9 +113,12 @@ CONFIG_TAXONOMY=y
+ CONFIG_FILS=y
+ CONFIG_FILS_SK_PFS=y
+ CONFIG_OWE=y
++# HPKE (used by DPP) is not implemented for the wolfssl TLS backend.
++ifneq ($(CONFIG_TLS), wolfssl)
+ CONFIG_DPP=y
+ CONFIG_DPP2=y
+ CONFIG_DPP3=y
++endif
+ CONFIG_WEP=y
+ CONFIG_PASN=y
+ CONFIG_AIRTIME_POLICY=y
+diff --git a/tests/hwsim/example-wpa_supplicant.config b/tests/hwsim/example-wpa_supplicant.config
+index 9606ce7eb..31bd6c739 100644
+--- a/tests/hwsim/example-wpa_supplicant.config
++++ b/tests/hwsim/example-wpa_supplicant.config
+@@ -1,6 +1,6 @@
+ #CC=ccache gcc
+ 
+-CONFIG_TLS=openssl
++#CONFIG_TLS=openssl
+ #CONFIG_TLS=wolfssl
+ #CONFIG_TLS=mbedtls
+ #CONFIG_TLS=internal
+@@ -156,9 +156,12 @@ CONFIG_FILS=y
+ CONFIG_FILS_SK_PFS=y
+ CONFIG_PMKSA_CACHE_EXTERNAL=y
+ CONFIG_OWE=y
++# HPKE (used by DPP) is not implemented for the wolfssl TLS backend.
++ifneq ($(CONFIG_TLS), wolfssl)
+ CONFIG_DPP=y
+ CONFIG_DPP2=y
+ CONFIG_DPP3=y
++endif
+ CONFIG_WEP=y
+ CONFIG_PASN=y
+ CONFIG_NAN_USD=y
+diff --git a/tests/hwsim/run-all.sh b/tests/hwsim/run-all.sh
+index 507488041..8a6154ef0 100755
+--- a/tests/hwsim/run-all.sh
++++ b/tests/hwsim/run-all.sh
+@@ -34,6 +34,7 @@ usage()
+ {
+ 	echo "$0 [-v | --valgrind | valgrind] [-t | --trace | trace]"
+ 	echo "\t[-n <num> | --channels <num>] [-B | --build]"
++	echo "\t[--force-config[=<tls>|<ap-tls>/<sup-tls>]]"
+ 	echo "\t[-c | --codecov ] [run-tests.py parameters]"
+ 	exit 1
+ }
+@@ -69,11 +70,23 @@ while [ "$1" != "" ]; do
+ 			echo "$0: build before running tests"
+ 			BUILD=build
+ 			;;
++		--force-config) # don't handle "-f", would shadow run-tests.py option
++			shift
++			echo "$0: build before running tests (force copy config)"
++			BUILD=build
++			BUILD_ARGS="$BUILD_ARGS -f"
++			;;
++		--force-config=*)
++			echo "$0: build before running tests (force copy config, TLS backend: ${1#--force-config=})"
++			BUILD=build
++			BUILD_ARGS="$BUILD_ARGS $1"
++			shift
++			;;
+ 		-c | --codecov)
+ 			shift
+ 			echo "$0: using code coverage"
+ 			CODECOV=lcov
+-			BUILD_ARGS=-c
++			BUILD_ARGS="$BUILD_ARGS -c"
+ 			;;
+ 		-h | --help)
+ 			usage
+-- 
+2.50.1 (Apple Git-155)
+

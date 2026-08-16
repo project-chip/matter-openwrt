@@ -1,0 +1,20 @@
+name: openwrt version
+description: Determines OPENWRT_VERSION from an override input or the Dockerfile
+
+inputs:
+  openwrt-version-override:
+    description: OpenWrt version number override
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Determine the OpenWrt version
+      shell: bash
+      run: |
+        if [[ -n "${{ inputs.openwrt-version-override }}" ]]; then
+          echo "OPENWRT_VERSION=${{ inputs.openwrt-version-override }}"
+        else
+          grep '^ARG OPENWRT_VERSION=' .containers/matter-openwrt-build/Dockerfile | cut -c 5-
+        fi | tee -a "$GITHUB_ENV"

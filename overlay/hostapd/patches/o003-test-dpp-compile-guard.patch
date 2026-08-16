@@ -1,0 +1,33 @@
+From 71412396becf86cdd4bd910f48a0bdebbe3f3ee5 Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Fri, 14 Aug 2026 11:16:56 +1200
+Subject: [PATCH] tests: Guard crypto_ec_get_generator() with CONFIG_DPP
+
+The function is only used from DPP code, and its implementation in the
+wolfSSL backend is guarded behind that define. Guard the call in
+crypto_module_tests.c as well to avoid a linker error.
+
+Signed-off-by: Karsten Sperling <ksperling@apple.com>
+---
+ src/crypto/crypto_module_tests.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/crypto/crypto_module_tests.c b/src/crypto/crypto_module_tests.c
+index 07c36d850..da2670e96 100644
+--- a/src/crypto/crypto_module_tests.c
++++ b/src/crypto/crypto_module_tests.c
+@@ -2509,7 +2509,10 @@ static int test_ecc(void)
+ 		    || crypto_ec_get_order(e) == NULL
+ 		    || crypto_ec_get_a(e) == NULL
+ 		    || crypto_ec_get_b(e) == NULL
+-		    || crypto_ec_get_generator(e) == NULL) {
++#ifdef CONFIG_DPP
++		    || crypto_ec_get_generator(e) == NULL
++#endif
++		    ) {
+ 			break;
+ 		}
+ #ifdef CONFIG_DPP
+-- 
+2.50.1 (Apple Git-155)
+

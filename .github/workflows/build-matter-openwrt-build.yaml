@@ -28,16 +28,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Prepare meta-data
-        id: prepare
-        shell: bash
-        run: |
-          # Determine OPENWRT_VERSION from override input or Dockerfile
-          if [[ -n "${{ inputs.openwrt-version-override }}" ]]; then
-            echo "OPENWRT_VERSION=${{ inputs.openwrt-version-override }}"
-          else
-            grep '^ARG OPENWRT_VERSION=' .containers/matter-openwrt-build/Dockerfile | cut -c 5-
-          fi | tee -a "$GITHUB_ENV"
+      - name: Determine OpenWrt version
+        uses: ./.github/actions/openwrt-version
+        with:
+          openwrt-version-override: ${{ inputs.openwrt-version-override }}
 
       - name: Build and push
         uses: elgohr/Publish-Docker-Github-Action@v5
