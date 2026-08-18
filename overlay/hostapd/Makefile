@@ -17,8 +17,11 @@ OVERLAY_RELEASE:=1
 include ../../include/overlay.mk
 
 define Overlay/BuildConfig
-# safe for all variants, no-op when CONFIG_EAP_TLS is not enabled
+# Safe for all package variants except those using the 'internal' TLS backend.
+# Only variants with CONFIG_EAP_TLS=y will actually build pinning support.
+ifneq ($(SSL_VARIANT),internal)
 DRIVER_MAKEOPTS += CONFIG_EAP_TLS_PINNING=y
+endif
 endef
 
 $(eval $(call BuildPackageOverlay,network/services/hostapd))

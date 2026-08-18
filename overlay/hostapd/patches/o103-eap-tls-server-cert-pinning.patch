@@ -1,4 +1,4 @@
-From e52755c05ab4d48f63bd9ae0b56fb10d0477e628 Mon Sep 17 00:00:00 2001
+From 13eaad49ffca32ee48ed6ec0303415f568bf55bb Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 3 Jul 2026 23:12:12 +1200
 Subject: [PATCH] EAP-TLS server: Add support for client cert pinning
@@ -59,10 +59,10 @@ Signed-off-by: Karsten Sperling <ksperling@apple.com>
  create mode 100644 tests/hwsim/test_ap_eap_tls_cert_pin.py
 
 diff --git a/hostapd/Makefile b/hostapd/Makefile
-index a7ebc534f..ee4e18079 100644
+index c277d070a..361e1a8ba 100644
 --- a/hostapd/Makefile
 +++ b/hostapd/Makefile
-@@ -434,6 +434,10 @@ ifdef CONFIG_EAP_TLS
+@@ -438,6 +438,10 @@ ifdef CONFIG_EAP_TLS
  CFLAGS += -DEAP_SERVER_TLS
  OBJS += ../src/eap_server/eap_server_tls.o
  TLS_FUNCS=y
@@ -211,10 +211,10 @@ index c0e903040..b58a65303 100644
  	}
  
 diff --git a/src/ap/ieee802_1x.c b/src/ap/ieee802_1x.c
-index 349e489c6..90bc43d70 100644
+index b0c386053..5f0b579a0 100644
 --- a/src/ap/ieee802_1x.c
 +++ b/src/ap/ieee802_1x.c
-@@ -2389,6 +2389,7 @@ static int ieee802_1x_get_eap_user(void *ctx, const u8 *identity,
+@@ -2391,6 +2391,7 @@ static int ieee802_1x_get_eap_user(void *ctx, const u8 *identity,
  
  	os_memset(user, 0, sizeof(*user));
  	user->phase2 = phase2;
@@ -492,7 +492,7 @@ index 81d1eedd4..7174cfb7a 100644
  	session_ctx[7] = (u8) eap_type;
  	if (tls_connection_set_verify(sm->cfg->ssl_ctx, data->conn, verify_peer,
 diff --git a/tests/hwsim/example-hostapd.config b/tests/hwsim/example-hostapd.config
-index 58b07513b..a2b526a27 100644
+index 383368bfd..20561a410 100644
 --- a/tests/hwsim/example-hostapd.config
 +++ b/tests/hwsim/example-hostapd.config
 @@ -14,6 +14,7 @@ CONFIG_EAP=y

@@ -1,8 +1,7 @@
-From 8a3ff9d9f228a40de81d2b91ac77beef7265aea8 Mon Sep 17 00:00:00 2001
+From 4e351c1e65e0c1590d59bfbe6ef05d4555ffc7c3 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Sun, 9 Aug 2026 02:25:05 +1200
-Subject: [PATCH] RADIUS server: Fix accept_attr leak, allocation size and NULL
- handling
+Subject: [PATCH] RADIUS server: accept_attr leak, alloc size, NULL handling
 
 radius_server_get_eap_user() is the get_eap_user callback, so it runs
 for every EAP user lookup and reassigns sess->accept_attr each time,
@@ -21,11 +20,11 @@ session.
 
 Signed-off-by: Karsten Sperling <ksperling@apple.com>
 ---
- src/radius/radius_server.c | 9 ++++++++-
- 1 file changed, 8 insertions(+), 1 deletion(-)
+ src/radius/radius_server.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
 
 diff --git a/src/radius/radius_server.c b/src/radius/radius_server.c
-index 44b4312e3..23d9a9333 100644
+index 44b4312e3..c65c1bfa4 100644
 --- a/src/radius/radius_server.c
 +++ b/src/radius/radius_server.c
 @@ -554,7 +554,7 @@ radius_server_copy_attr(const struct hostapd_radius_attr *data)
@@ -48,14 +47,16 @@ index 44b4312e3..23d9a9333 100644
  
  	sess->username = os_malloc(user_len * 4 + 1);
  	if (sess->username == NULL) {
-@@ -2370,7 +2374,10 @@ static int radius_server_get_eap_user(void *ctx, const u8 *identity,
+@@ -2370,7 +2374,11 @@ static int radius_server_get_eap_user(void *ctx, const u8 *identity,
  	ret = data->get_eap_user(data->conf_ctx, identity, identity_len,
  				 phase2, user);
  	if (ret == 0 && user) {
-+		os_free(sess->accept_attr);
- 		sess->accept_attr = radius_server_copy_attr(user->accept_attr);
-+		if (sess->accept_attr == NULL)
+-		sess->accept_attr = radius_server_copy_attr(user->accept_attr);
++		struct radius_accept_attr *attr = radius_server_copy_attr(user->accept_attr);
++		if (attr == NULL)
 +			return -1;
++		os_free(sess->accept_attr);
++		sess->accept_attr = attr;
  		sess->macacl = user->macacl;
  		sess->t_c_timestamp = user->t_c_timestamp;
  	}
