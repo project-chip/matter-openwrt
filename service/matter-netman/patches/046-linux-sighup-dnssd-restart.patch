@@ -1,0 +1,156 @@
+From b5ce2a14a60656b8710d6175e04031283f318370 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 8 Aug 2026 21:24:11 +0200
+Subject: [PATCH] [linux] restart DNS-SD on SIGHUP
+
+minimal-mDNS binds one UDP endpoint per interface and enumerates the interfaces
+once, when the advertiser starts. An interface that appears later is therefore
+never advertised on, and one that goes away leaves a dead endpoint behind. The
+usual example of both is a Thread border router, where wpan0 comes up well after
+the application does.
+
+In a minimal-mDNS build nothing posts kDnssdRestartNeeded on Linux, so the only
+way to pick up a new interface is to restart the process -- which also drops
+every CASE session and subscription, so controllers have to re-establish them and
+any subscribed attribute reporting stops until they do.
+
+Handle SIGHUP and post the event instead. A service manager can then reload the
+daemon from an interface hotplug hook and keep the sessions. The handler itself
+only writes a byte to a pipe, which is async-signal-safe; the pipe is watched by
+the system layer, so the work happens on the CHIP event loop with the stack lock
+held, and a burst of signals collapses into a single restart.
+
+Guarded on CHIP_SYSTEM_CONFIG_USE_SOCKETS as well as the Darwin check, because
+the socket watch API it uses is declared only under the former -- the
+openthread-endpoint configurations build this file with sockets disabled.
+
+This is a stopgap. The application should not need to be told that its own
+interfaces changed, and a netlink watcher inside the Linux platform would remove
+the need for the signal entirely. It is useful in the meantime, and being able
+to ask for a rebind explicitly is worth having either way.
+
+Tested on the network-manager example: SIGHUP re-runs the interface enumeration
+and re-advertises without restarting, five signals in a row collapse into one
+restart, and the descriptor count does not move.
+
+Assisted-By: Claude Opus 5
+Signed-off-by: Christian Glombek <c.glombek@cosa.systems>
+---
+ examples/platform/linux/AppMain.cpp | 86 +++++++++++++++++++++++++++++
+ 1 file changed, 86 insertions(+)
+
+diff --git a/examples/platform/linux/AppMain.cpp b/examples/platform/linux/AppMain.cpp
+index 5547628806..f6311ffd47 100644
+--- a/examples/platform/linux/AppMain.cpp
++++ b/examples/platform/linux/AppMain.cpp
+@@ -129,7 +129,10 @@
+ #endif
+ #include <app/TestEventTriggerDelegate.h>
+ 
++#include <errno.h>
++#include <fcntl.h>
+ #include <signal.h>
++#include <unistd.h>
+ 
+ #include "AppMain.h"
+ #include "CommissionableInit.h"
+@@ -383,6 +386,84 @@ void StopSignalHandler(int /* signal */)
+     StopMainEventLoop();
+ }
+ 
++#if CHIP_SYSTEM_CONFIG_USE_SOCKETS && !CHIP_DEVICE_LAYER_TARGET_DARWIN
++// SIGHUP asks the application to pick up the current set of network interfaces without
++// restarting. A service manager can then reload the daemon on an interface change instead
++// of killing it, which would drop every CASE session and subscription along with it.
++int gReloadPipe[2] = { -1, -1 };
++chip::System::SocketWatchToken gReloadPipeWatch;
++
++void ReloadSignalHandler(int /* signal */)
++{
++    // Runs in signal context, so the only thing that happens here is a write to wake the
++    // event loop; write() is async-signal-safe and the actual work runs on the CHIP thread.
++    // A full pipe means a reload is already pending, which is the same outcome.
++    const uint8_t token = 1;
++    ssize_t ignored     = write(gReloadPipe[1], &token, sizeof(token));
++    (void) ignored;
++}
++
++void OnReloadRequested(chip::System::SocketEvents, intptr_t)
++{
++    uint8_t drain[8];
++    while (read(gReloadPipe[0], drain, sizeof(drain)) > 0)
++    {
++        // Coalesce a burst of signals into the single restart below.
++    }
++
++    ChipLogProgress(DeviceLayer, "SIGHUP received, restarting DNS-SD");
++
++    chip::DeviceLayer::ChipDeviceEvent event{};
++    event.Type = chip::DeviceLayer::DeviceEventType::kDnssdRestartNeeded;
++    chip::DeviceLayer::PlatformMgr().PostEventOrDie(&event);
++}
++
++CHIP_ERROR SetupReloadSignalHandler()
++{
++    VerifyOrReturnError(pipe(gReloadPipe) == 0, CHIP_ERROR_POSIX(errno));
++
++    CHIP_ERROR err = CHIP_NO_ERROR;
++    for (int fd : gReloadPipe)
++    {
++        VerifyOrExit(fcntl(fd, F_SETFL, O_NONBLOCK) == 0, err = CHIP_ERROR_POSIX(errno));
++        VerifyOrExit(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0, err = CHIP_ERROR_POSIX(errno));
++    }
++
++    {
++        auto & layer = chip::DeviceLayer::SystemLayerSockets();
++        SuccessOrExit(err = layer.StartWatchingSocket(gReloadPipe[0], &gReloadPipeWatch));
++        SuccessOrExit(err = layer.SetCallback(gReloadPipeWatch, OnReloadRequested, 0));
++        SuccessOrExit(err = layer.RequestCallbackOnPendingRead(gReloadPipeWatch));
++    }
++
++    {
++        struct sigaction sa = {};
++        sa.sa_handler       = ReloadSignalHandler;
++        sa.sa_flags         = SA_RESTART;
++        VerifyOrExit(sigaction(SIGHUP, &sa, nullptr) == 0, err = CHIP_ERROR_POSIX(errno));
++    }
++
++    return CHIP_NO_ERROR;
++
++exit:
++    // Leave nothing half-registered: the handler would otherwise write to a descriptor nobody
++    // is watching, or the event loop would watch a descriptor nobody writes to.
++    if (gReloadPipeWatch != 0)
++    {
++        TEMPORARY_RETURN_IGNORED chip::DeviceLayer::SystemLayerSockets().StopWatchingSocket(&gReloadPipeWatch);
++    }
++    for (int & fd : gReloadPipe)
++    {
++        if (fd >= 0)
++        {
++            close(fd);
++            fd = -1;
++        }
++    }
++    return err;
++}
++#endif // CHIP_SYSTEM_CONFIG_USE_SOCKETS && !CHIP_DEVICE_LAYER_TARGET_DARWIN
++
+ } // namespace
+ 
+ #if CHIP_DEVICE_CONFIG_ENABLE_WPA && CHIP_DEVICE_CONFIG_SUPPORTS_CONCURRENT_CONNECTION
+@@ -1075,6 +1156,11 @@ void ChipLinuxAppMainLoop(chip::ServerInitParams & initParams, AppMainLoopImplem
+     sigaction(SIGTERM, &sa, nullptr);
+ #endif
+ 
++#if CHIP_SYSTEM_CONFIG_USE_SOCKETS && !CHIP_DEVICE_LAYER_TARGET_DARWIN
++    // Losing this only means SIGHUP keeps its default action, so it is not worth failing over.
++    LogErrorOnFailure(SetupReloadSignalHandler());
++#endif
++
+     // This message is used as a marker for when the application process has started.
+     // See: scripts/tests/chiptest/test_definition.py
+     // TODO: A cleaner and more generic mechanism needs to be developed as a follow-up.
+-- 
+2.55.0
+

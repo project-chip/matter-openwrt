@@ -1,0 +1,2330 @@
+From 763d3acd0a649467e2c075c4099e1189e1b718b7 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Thu, 30 Jul 2026 07:29:29 +0200
+Subject: [PATCH] [network-manager] serve the full NIM cluster set from OpenWrt
+
+The NIM device type carries three data-bearing clusters beside Thread
+Border Router Management, and on OpenWrt all of them can be served with
+real data instead of stubs:
+
+Wi-Fi Network Management previously served hardcoded demo credentials.
+A new provider reads the router's access point configuration from netifd
+(network.wireless status) and pushes it into the cluster: the first
+AP-mode interface attached to a configurable network (default lan, so
+guest APs are excluded), overridable with --wifi-iface. An empty network
+name with no override disables sharing entirely; open and enterprise
+encryptions clear the credentials. procd's wireless reload trigger pokes
+the new reload_wifi method on the matter ubus object, so configuration
+changes propagate; the demo credentials remain for non-ubus builds.
+
+Thread Network Diagnostics reported an unprovisioned device: the direct
+provider needs an in-process Thread stack, and this application's Thread
+state lives in otbr-agent. A ubus-fed provider serves the routing role
+and dataset-derived attributes from otbr's status snapshot and
+notifications, and fetches leader data, RLOC16 and the neighbor table at
+read time. A small hook makes the codegen-integrated provider
+replaceable for such out-of-process designs.
+
+The Thread Network Directory started empty until a controller populated
+it. The border router now records its own network: a storage accessor on
+the directory server plus an active-dataset observer on the TBRM
+delegate keep the entry current across dataset changes; networks are
+deliberately never removed, since the directory lists known networks
+rather than the current one.
+
+Ethernet Network Diagnostics joins the root endpoint: the router's
+uplink is what the whole node runs over, and the Linux platform already
+provides the counters and PHY data.
+
+Assisted-By: Claude Fable 5
+---
+ examples/network-manager-app/linux/BUILD.gn   |   6 +
+ .../linux/MatterUbusService.cpp               | 171 +++++++++
+ .../linux/MatterUbusService.h                 |  18 +
+ .../linux/NimDiagnostics.cpp                  | 209 +++++++++++
+ .../linux/NimDiagnostics.h                    |  71 ++++
+ .../linux/NimInstanceInfo.cpp                 | 180 +++++++++
+ .../linux/NimInstanceInfo.h                   |  66 ++++
+ .../linux/ThreadBROpenThreadUbus.cpp          |   4 +
+ .../linux/ThreadBROpenThreadUbus.h            |  17 +
+ .../linux/ThreadDiagnosticsUbus.cpp           | 347 ++++++++++++++++++
+ .../linux/ThreadDiagnosticsUbus.h             |  62 ++++
+ .../network-manager-app/linux/UboxUtils.cpp   |   3 +-
+ .../network-manager-app/linux/UboxUtils.h     |  10 +-
+ .../linux/WiFiCredentialsUbus.cpp             | 251 +++++++++++++
+ .../linux/WiFiCredentialsUbus.h               |  70 ++++
+ examples/network-manager-app/linux/main.cpp   | 225 +++++++++++-
+ .../network-manager-app.matter                |  57 +++
+ .../network-manager-app.zap                   | 198 +++++++++-
+ 18 files changed, 1957 insertions(+), 8 deletions(-)
+ create mode 100644 examples/network-manager-app/linux/NimDiagnostics.cpp
+ create mode 100644 examples/network-manager-app/linux/NimDiagnostics.h
+ create mode 100644 examples/network-manager-app/linux/NimInstanceInfo.cpp
+ create mode 100644 examples/network-manager-app/linux/NimInstanceInfo.h
+ create mode 100644 examples/network-manager-app/linux/ThreadDiagnosticsUbus.cpp
+ create mode 100644 examples/network-manager-app/linux/ThreadDiagnosticsUbus.h
+ create mode 100644 examples/network-manager-app/linux/WiFiCredentialsUbus.cpp
+ create mode 100644 examples/network-manager-app/linux/WiFiCredentialsUbus.h
+
+diff --git a/examples/network-manager-app/linux/BUILD.gn b/examples/network-manager-app/linux/BUILD.gn
+index 580f03f830..5d854c9dc7 100644
+--- a/examples/network-manager-app/linux/BUILD.gn
++++ b/examples/network-manager-app/linux/BUILD.gn
+@@ -40,15 +40,21 @@ executable("matter-network-manager-app") {
+     defines += [ "MATTER_ENABLE_UBUS=1" ]
+     sources += [
+       "MatterUbusService.cpp",
++      "NimDiagnostics.cpp",
++      "NimInstanceInfo.cpp",
+       "MatterUbusService.h",
+       "ThreadBROpenThreadUbus.cpp",
+       "ThreadBROpenThreadUbus.h",
++      "ThreadDiagnosticsUbus.cpp",
++      "ThreadDiagnosticsUbus.h",
+       "UboxUtils.cpp",
+       "UboxUtils.h",
+       "UbusManager.cpp",
+       "UbusManager.h",
+       "UloopHandler.cpp",
+       "UloopHandler.h",
++      "WiFiCredentialsUbus.cpp",
++      "WiFiCredentialsUbus.h",
+     ]
+     libs += [
+       "ubox",
+diff --git a/examples/network-manager-app/linux/MatterUbusService.cpp b/examples/network-manager-app/linux/MatterUbusService.cpp
+index 41b9d3b26f..e1e812ed77 100644
+--- a/examples/network-manager-app/linux/MatterUbusService.cpp
++++ b/examples/network-manager-app/linux/MatterUbusService.cpp
+@@ -19,11 +19,18 @@
+ 
+ #include "UboxUtils.h"
+ 
++#include <app/clusters/thread-network-directory-server/ThreadNetworkDirectoryStorage.h>
++#include <app/clusters/wifi-network-management-server/WiFiNetworkManagementCluster.h>
+ #include <app/server/Server.h>
++#include <app/util/attribute-storage.h>
++#include <app/util/endpoint-config-api.h>
+ #include <lib/support/CodeUtils.h>
++#include <lib/support/ThreadOperationalDataset.h>
+ #include <platform/CHIPDeviceLayer.h>
+ #include <setup_payload/OnboardingCodesUtil.h>
+ 
++#include <inttypes.h>
++
+ extern "C" {
+ #include <libubus.h>
+ #undef fallthrough
+@@ -83,6 +90,98 @@ void AddOnboarding(ubus::BlobMsgBuf & buf)
+     }
+ }
+ 
++app::Clusters::WiFiNetworkManagementCluster * sWifiCluster  = nullptr;
++app::ThreadNetworkDirectoryStorage * sDirectory             = nullptr;
++
++// The clusters this node actually implements, per endpoint, read from the
++// data model rather than listed here, so the report cannot drift from what
++// a controller sees.
++void AddClusters(ubus::BlobMsgBuf & buf)
++{
++    auto cookie = buf.AddArray("Endpoints");
++    for (uint16_t index = 0; index < emberAfEndpointCount(); index++)
++    {
++        VerifyOrDo(emberAfEndpointIndexIsEnabled(index), continue);
++        EndpointId endpoint = emberAfEndpointFromIndex(index);
++
++        ClusterId clusters[64];
++        uint8_t count = emberAfGetClustersFromEndpoint(endpoint, clusters, MATTER_ARRAY_SIZE(clusters), /* server = */ true);
++
++        auto entry = buf.AddTable(nullptr);
++        buf.Add("Endpoint", static_cast<uint32_t>(endpoint));
++        auto list = buf.AddArray("Clusters");
++        for (uint8_t i = 0; i < count; i++)
++        {
++            buf.AddFormat(nullptr, "0x%04x", static_cast<unsigned>(clusters[i]));
++        }
++    }
++}
++
++// The controllers this node is paired with. The node id is the identity
++// this node was given on that fabric, i.e. how the controller addresses it.
++void AddFabrics(ubus::BlobMsgBuf & buf)
++{
++    auto cookie = buf.AddArray("FabricList");
++    for (const auto & fabric : Server::GetInstance().GetFabricTable())
++    {
++        auto entry = buf.AddTable(nullptr);
++        buf.Add("Index", static_cast<uint32_t>(fabric.GetFabricIndex()));
++        buf.Add("VendorId", static_cast<uint32_t>(fabric.GetVendorId()));
++        buf.AddFormat("FabricId", "%016" PRIx64, fabric.GetFabricId());
++        buf.AddFormat("NodeId", "%016" PRIx64, fabric.GetNodeId());
++        CharSpan label = fabric.GetFabricLabel();
++        if (!label.empty())
++        {
++            buf.AddFormat("Label", "%.*s", static_cast<int>(label.size()), label.data());
++        }
++    }
++}
++
++// What the node currently shares with controllers: the Wi-Fi credentials
++// state (without the passphrase) and the Thread networks in the directory.
++void AddSharingState(ubus::BlobMsgBuf & buf)
++{
++    if (sWifiCluster != nullptr)
++    {
++        const bool sharing = sWifiCluster->HasNetworkCredentials();
++        buf.Add("WifiShare", sharing);
++        if (sharing)
++        {
++            ByteSpan ssid = sWifiCluster->Ssid();
++            buf.AddFormat("WifiSsid", "%.*s", static_cast<int>(ssid.size()), reinterpret_cast<const char *>(ssid.data()));
++        }
++    }
++
++    // Reported either way, so a user interface can tell "this node does not
++    // manage Thread" from "it does, and the directory happens to be empty".
++    buf.Add("ThreadManaged", sDirectory != nullptr);
++
++    if (sDirectory != nullptr)
++    {
++        auto cookie = buf.AddArray("Directory");
++        auto * it   = sDirectory->IterateNetworkIds();
++        VerifyOrReturn(it != nullptr);
++        app::ThreadNetworkDirectoryStorage::ExtendedPanId exPanId;
++        while (it->Next(exPanId))
++        {
++            uint8_t datasetBuffer[app::ThreadNetworkDirectoryStorage::kMaxThreadDatasetLen];
++            MutableByteSpan dataset(datasetBuffer);
++            auto entry = buf.AddTable(nullptr);
++            buf.AddFormat("ExtendedPanId", "%016" PRIx64, exPanId.AsNumber());
++            Thread::OperationalDatasetView view;
++            if (sDirectory->GetNetworkDataset(exPanId, dataset) == CHIP_NO_ERROR && view.Init(dataset) == CHIP_NO_ERROR)
++            {
++                char name[Thread::kSizeNetworkName + 1];
++                if (view.GetNetworkName(name) == CHIP_NO_ERROR)
++                {
++                    buf.Add("NetworkName", static_cast<const char *>(name));
++                }
++            }
++        }
++        it->Release();
++    }
++}
++
+ int HandleStatus(ubus_context * ctx, ubus_object * obj, ubus_request_data * req, const char * method, blob_attr * msg)
+ {
+     ubus::BlobMsgBuf buf;
+@@ -92,6 +191,9 @@ int HandleStatus(ubus_context * ctx, ubus_object * obj, ubus_request_data * req,
+     // fabric is on the device (the initial basic window) or while a basic
+     // window is open; report it so a UI can decide what to show.
+     AddOnboarding(buf);
++    AddFabrics(buf);
++    AddSharingState(buf);
++    AddClusters(buf);
+     ubus_send_reply(ctx, req, buf.head);
+     return 0;
+ }
+@@ -146,10 +248,63 @@ int HandleCloseWindow(ubus_context * ctx, ubus_object * obj, ubus_request_data *
+     return 0;
+ }
+ 
++MatterUbusService::ReloadWifiHandler sReloadWifiHandler = nullptr;
++void * sReloadWifiContext                               = nullptr;
++int HandleReloadWifi(ubus_context * ctx, ubus_object * obj, ubus_request_data * req, const char * method, blob_attr * msg)
++{
++    if (sReloadWifiHandler != nullptr)
++    {
++        sReloadWifiHandler(sReloadWifiContext);
++    }
++
++    ubus::BlobMsgBuf buf;
++    buf.Add("Error", static_cast<uint32_t>(0));
++    ubus_send_reply(ctx, req, buf.head);
++    return 0;
++}
++
++enum
++{
++    REMOVE_FABRIC_INDEX,
++    __REMOVE_FABRIC_MAX,
++};
++
++const blobmsg_policy kRemoveFabricPolicy[__REMOVE_FABRIC_MAX] = {
++    [REMOVE_FABRIC_INDEX] = { .name = "index", .type = BLOBMSG_TYPE_INT32 },
++};
++
++// Unpairs a controller. The fabric table's delegates take care of the
++// associated sessions, ACL entries and group keys, which is what the
++// RemoveFabric command of the Operational Credentials cluster does too.
++int HandleRemoveFabric(ubus_context * ctx, ubus_object * obj, ubus_request_data * req, const char * method, blob_attr * msg)
++{
++    blob_attr * tb[__REMOVE_FABRIC_MAX];
++    blobmsg_parse(kRemoveFabricPolicy, __REMOVE_FABRIC_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
++    VerifyOrReturnValue(tb[REMOVE_FABRIC_INDEX] != nullptr, UBUS_STATUS_INVALID_ARGUMENT);
++
++    uint32_t index = blobmsg_get_u32(tb[REMOVE_FABRIC_INDEX]);
++    VerifyOrReturnValue(index <= UINT8_MAX && IsValidFabricIndex(static_cast<FabricIndex>(index)),
++                        UBUS_STATUS_INVALID_ARGUMENT);
++
++    CHIP_ERROR err = Server::GetInstance().GetFabricTable().Delete(static_cast<FabricIndex>(index));
++    if (err != CHIP_NO_ERROR)
++    {
++        ChipLogError(AppServer, "Removing fabric %u failed: %" CHIP_ERROR_FORMAT, index, err.Format());
++    }
++
++    ubus::BlobMsgBuf buf;
++    buf.Add("Error", static_cast<uint32_t>(err == CHIP_NO_ERROR ? 0 : 1));
++    buf.Add("Fabrics", static_cast<uint32_t>(Server::GetInstance().GetFabricTable().FabricCount()));
++    ubus_send_reply(ctx, req, buf.head);
++    return 0;
++}
++
+ ubus_method sMethods[] = {
+     UBUS_METHOD_NOARG("status", HandleStatus),
+     UBUS_METHOD("open_commissioning_window", HandleOpenWindow, kOpenWindowPolicy),
+     UBUS_METHOD_NOARG("close_commissioning_window", HandleCloseWindow),
++    UBUS_METHOD_NOARG("reload_wifi", HandleReloadWifi),
++    UBUS_METHOD("remove_fabric", HandleRemoveFabric, kRemoveFabricPolicy),
+ };
+ 
+ ubus_object_type sObjectType = UBUS_OBJECT_TYPE("matter", sMethods);
+@@ -169,4 +324,20 @@ CHIP_ERROR MatterUbusService::Init()
+     return CHIP_NO_ERROR;
+ }
+ 
++void MatterUbusService::SetReloadWifiHandler(ReloadWifiHandler handler, void * context)
++{
++    sReloadWifiHandler = handler;
++    sReloadWifiContext = context;
++}
++
++void MatterUbusService::SetWiFiCluster(app::Clusters::WiFiNetworkManagementCluster * cluster)
++{
++    sWifiCluster = cluster;
++}
++
++void MatterUbusService::SetThreadDirectory(app::ThreadNetworkDirectoryStorage * storage)
++{
++    sDirectory = storage;
++}
++
+ } // namespace chip
+diff --git a/examples/network-manager-app/linux/MatterUbusService.h b/examples/network-manager-app/linux/MatterUbusService.h
+index 165ff5906d..8523ede5d1 100644
+--- a/examples/network-manager-app/linux/MatterUbusService.h
++++ b/examples/network-manager-app/linux/MatterUbusService.h
+@@ -21,16 +21,34 @@
+ 
+ namespace chip {
+ 
++namespace app {
++class ThreadNetworkDirectoryStorage;
++namespace Clusters {
++class WiFiNetworkManagementCluster;
++} // namespace Clusters
++} // namespace app
++
+ // Publishes a "matter" ubus object exposing this node's onboarding
+ // information and local control of the commissioning window, so a router UI
+ // can pair the device with a controller without access to the daemon's log.
+ class MatterUbusService
+ {
+ public:
++    using ReloadWifiHandler = void (*)(void * context);
++
+     MatterUbusService(ubus::UbusManager & ubusManager) : mUbusManager(ubusManager) {}
+ 
+     CHIP_ERROR Init();
+ 
++    // Called from the reload_wifi ubus method; procd triggers it on wireless
++    // configuration changes. Must be set before Init().
++    void SetReloadWifiHandler(ReloadWifiHandler handler, void * context);
++
++    // Sources for the sharing state reported by the status method. Must be
++    // set before Init(); pass nullptr to omit the respective fields.
++    void SetWiFiCluster(app::Clusters::WiFiNetworkManagementCluster * cluster);
++    void SetThreadDirectory(app::ThreadNetworkDirectoryStorage * storage);
++
+ private:
+     ubus::UbusManager & mUbusManager;
+ };
+diff --git a/examples/network-manager-app/linux/NimDiagnostics.cpp b/examples/network-manager-app/linux/NimDiagnostics.cpp
+new file mode 100644
+index 0000000000..17ab810589
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimDiagnostics.cpp
+@@ -0,0 +1,209 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#include "NimDiagnostics.h"
++
++#include <cstdio>
++#include <cstring>
++#include <sys/sysinfo.h>
++
++namespace chip {
++
++using DeviceLayer::NetworkInterface;
++using InterfaceType = app::Clusters::GeneralDiagnostics::InterfaceTypeEnum;
++
++NimDiagnosticsProvider & NimDiagnosticsProvider::Instance()
++{
++    static NimDiagnosticsProvider sInstance;
++    return sInstance;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetNetworkInterfaces(NetworkInterface ** netifpp)
++{
++    NetworkInterface * all = nullptr;
++    ReturnErrorOnFailure(DiagnosticDataProviderImpl::GetNetworkInterfaces(&all));
++
++    NetworkInterface * primary = nullptr;
++    NetworkInterface * rest    = nullptr;
++
++    while (all != nullptr)
++    {
++        NetworkInterface * current = all;
++        all                        = all->Next;
++
++        if (mPrimary != nullptr && strcmp(current->Name, mPrimary) == 0)
++        {
++            // The bridge the node lives on. The kernel cannot type a
++            // bridge; this node knows what it stands in for.
++            current->type = InterfaceType::kEthernet;
++            primary       = current;
++            continue;
++        }
++        if (strncmp(current->Name, "wpan", 4) == 0)
++        {
++            current->type = InterfaceType::kThread;
++        }
++        else if (current->type != InterfaceType::kWiFi)
++        {
++            delete current;
++            continue;
++        }
++        current->Next = rest;
++        rest          = current;
++    }
++
++    if (primary != nullptr)
++    {
++        primary->Next = rest;
++        rest          = primary;
++    }
++
++    *netifpp = rest;
++    return CHIP_NO_ERROR;
++}
++
++
++CHIP_ERROR NimDiagnosticsProvider::ReadSysfs(const char * file, long long & value) const
++{
++    VerifyOrReturnError(mEthernetDiagnostics, CHIP_ERROR_READ_FAILED);
++    char path[128];
++    snprintf(path, sizeof(path), "/sys/class/net/%s/%s", DiagnosticsInterface(), file);
++    FILE * fp = fopen(path, "r");
++    VerifyOrReturnError(fp != nullptr, CHIP_ERROR_READ_FAILED);
++    int matched = fscanf(fp, "%lld", &value);
++    fclose(fp);
++    VerifyOrReturnError(matched == 1, CHIP_ERROR_READ_FAILED);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthPHYRate(app::Clusters::EthernetNetworkDiagnostics::PHYRateEnum & pHYRate)
++{
++    using app::Clusters::EthernetNetworkDiagnostics::PHYRateEnum;
++    long long speed = 0;
++    ReturnErrorOnFailure(ReadSysfs("speed", speed));
++    switch (speed)
++    {
++    case 10:
++        pHYRate = PHYRateEnum::kRate10M;
++        break;
++    case 100:
++        pHYRate = PHYRateEnum::kRate100M;
++        break;
++    case 1000:
++        pHYRate = PHYRateEnum::kRate1G;
++        break;
++    case 2500:
++        pHYRate = PHYRateEnum::kRate25g;
++        break;
++    case 5000:
++        pHYRate = PHYRateEnum::kRate5G;
++        break;
++    case 10000:
++        pHYRate = PHYRateEnum::kRate10G;
++        break;
++    default:
++        return CHIP_ERROR_READ_FAILED;
++    }
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthFullDuplex(bool & fullDuplex)
++{
++    VerifyOrReturnError(mEthernetDiagnostics, CHIP_ERROR_READ_FAILED);
++    char path[128];
++    snprintf(path, sizeof(path), "/sys/class/net/%s/duplex", DiagnosticsInterface());
++    FILE * fp = fopen(path, "r");
++    VerifyOrReturnError(fp != nullptr, CHIP_ERROR_READ_FAILED);
++    char duplex[16] = {};
++    int matched     = fscanf(fp, "%15s", duplex);
++    fclose(fp);
++    VerifyOrReturnError(matched == 1, CHIP_ERROR_READ_FAILED);
++    if (strcmp(duplex, "full") == 0)
++    {
++        fullDuplex = true;
++    }
++    else if (strcmp(duplex, "half") == 0)
++    {
++        fullDuplex = false;
++    }
++    else
++    {
++        // A bridge has no duplex of its own; null beats a made-up answer.
++        return CHIP_ERROR_READ_FAILED;
++    }
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthCarrierDetect(bool & carrierDetect)
++{
++    long long carrier = 0;
++    ReturnErrorOnFailure(ReadSysfs("carrier", carrier));
++    carrierDetect = carrier != 0;
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthPacketRxCount(uint64_t & packetRxCount)
++{
++    long long value = 0;
++    ReturnErrorOnFailure(ReadSysfs("statistics/rx_packets", value));
++    packetRxCount = static_cast<uint64_t>(value);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthPacketTxCount(uint64_t & packetTxCount)
++{
++    long long value = 0;
++    ReturnErrorOnFailure(ReadSysfs("statistics/tx_packets", value));
++    packetTxCount = static_cast<uint64_t>(value);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthTxErrCount(uint64_t & txErrCount)
++{
++    long long value = 0;
++    ReturnErrorOnFailure(ReadSysfs("statistics/tx_errors", value));
++    txErrCount = static_cast<uint64_t>(value);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthCollisionCount(uint64_t & collisionCount)
++{
++    long long value = 0;
++    ReturnErrorOnFailure(ReadSysfs("statistics/collisions", value));
++    collisionCount = static_cast<uint64_t>(value);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthOverrunCount(uint64_t & overrunCount)
++{
++    long long value = 0;
++    ReturnErrorOnFailure(ReadSysfs("statistics/rx_over_errors", value));
++    overrunCount = static_cast<uint64_t>(value);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR NimDiagnosticsProvider::GetEthTimeSinceReset(uint64_t & timeSinceReset)
++{
++    VerifyOrReturnError(mEthernetDiagnostics, CHIP_ERROR_READ_FAILED);
++    // The sysfs counters count from boot, so that is when they were reset.
++    struct sysinfo info;
++    VerifyOrReturnError(sysinfo(&info) == 0, CHIP_ERROR_READ_FAILED);
++    timeSinceReset = static_cast<uint64_t>(info.uptime);
++    return CHIP_NO_ERROR;
++}
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/NimDiagnostics.h b/examples/network-manager-app/linux/NimDiagnostics.h
+new file mode 100644
+index 0000000000..9d73c15679
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimDiagnostics.h
+@@ -0,0 +1,71 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#pragma once
++
++#include <platform/Linux/DiagnosticDataProviderImpl.h>
++
++namespace chip {
++
++// A router has dozens of kernel interfaces: VLANs, guest bridges, tunnels.
++// Reporting them all in General Diagnostics buries the ones a controller
++// can reason about and leaks the internal topology besides. This provider
++// narrows the report to the interfaces that describe this node: the bridge
++// it is reachable on first, then the Thread and Wi-Fi radios.
++class NimDiagnosticsProvider : public DeviceLayer::DiagnosticDataProviderImpl
++{
++public:
++    static NimDiagnosticsProvider & Instance();
++
++    // The interface this node's Matter traffic actually uses. Reported
++    // first, as Ethernet, so a controller picking "the" interface gets it.
++    void SetPrimaryInterface(const char * name) { mPrimary = name; }
++
++    // The interface whose state feeds the Ethernet diagnostics; defaults
++    // to the primary interface.
++    void SetDiagnosticsInterface(const char * name) { mDiagnostics = name; }
++
++    // Diagnostics are readable by any fabric with View access; an operator
++    // who considers the router's traffic counters nobody's business can
++    // turn them off, which makes every reading null.
++    void SetEthernetDiagnosticsEnabled(bool enabled) { mEthernetDiagnostics = enabled; }
++
++    CHIP_ERROR GetNetworkInterfaces(DeviceLayer::NetworkInterface ** netifpp) override;
++
++    // The stock implementation asks ethtool, which a bridge cannot answer,
++    // so every reading comes back empty or zero. The kernel publishes the
++    // real state of the primary interface in sysfs; serve that instead.
++    CHIP_ERROR GetEthPHYRate(app::Clusters::EthernetNetworkDiagnostics::PHYRateEnum & pHYRate) override;
++    CHIP_ERROR GetEthFullDuplex(bool & fullDuplex) override;
++    CHIP_ERROR GetEthCarrierDetect(bool & carrierDetect) override;
++    CHIP_ERROR GetEthPacketRxCount(uint64_t & packetRxCount) override;
++    CHIP_ERROR GetEthPacketTxCount(uint64_t & packetTxCount) override;
++    CHIP_ERROR GetEthTxErrCount(uint64_t & txErrCount) override;
++    CHIP_ERROR GetEthCollisionCount(uint64_t & collisionCount) override;
++    CHIP_ERROR GetEthOverrunCount(uint64_t & overrunCount) override;
++    CHIP_ERROR GetEthTimeSinceReset(uint64_t & timeSinceReset) override;
++
++private:
++    CHIP_ERROR ReadSysfs(const char * file, long long & value) const;
++    const char * DiagnosticsInterface() const { return mDiagnostics != nullptr ? mDiagnostics : mPrimary; }
++
++    const char * mPrimary     = "br-lan";
++    const char * mDiagnostics = nullptr;
++    bool mEthernetDiagnostics = true;
++};
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/NimInstanceInfo.cpp b/examples/network-manager-app/linux/NimInstanceInfo.cpp
+new file mode 100644
+index 0000000000..b93c46a386
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimInstanceInfo.cpp
+@@ -0,0 +1,180 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#include "NimInstanceInfo.h"
++
++#include <lib/support/CHIPMemString.h>
++
++#include <fstream>
++#include <sstream>
++
++namespace chip {
++
++namespace {
++
++// Values in os-release are shell-quoted; the quotes are not part of them.
++std::string Unquote(std::string value)
++{
++    if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
++    {
++        return value.substr(1, value.size() - 2);
++    }
++    return value;
++}
++
++std::string OsReleaseField(const char * key)
++{
++    std::ifstream file("/etc/os-release");
++    std::string line;
++    while (std::getline(file, line))
++    {
++        auto eq = line.find('=');
++        if (eq != std::string::npos && line.compare(0, eq, key) == 0)
++        {
++            return Unquote(line.substr(eq + 1));
++        }
++    }
++    return "";
++}
++
++std::string FirstLine(const char * path)
++{
++    std::ifstream file(path);
++    std::string line;
++    std::getline(file, line);
++    return line;
++}
++
++} // namespace
++
++NimInstanceInfoProvider & NimInstanceInfoProvider::Instance()
++{
++    static NimInstanceInfoProvider sInstance;
++    return sInstance;
++}
++
++void NimInstanceInfoProvider::Init()
++{
++    mFallback = DeviceLayer::GetDeviceInstanceInfoProvider();
++
++    if (mVendorName.empty())
++    {
++        mVendorName = OsReleaseField("OPENWRT_DEVICE_MANUFACTURER");
++    }
++    mProductUrl = OsReleaseField("OPENWRT_DEVICE_MANUFACTURER_URL");
++
++    // The device the firmware runs on, with its revision when the firmware
++    // knows one: "Turris Omnia (v0)".
++    std::string product = OsReleaseField("OPENWRT_DEVICE_PRODUCT");
++    if (product.empty())
++    {
++        product = FirstLine("/tmp/sysinfo/model");
++    }
++    if (product.empty())
++    {
++        product = FirstLine("/proc/device-tree/model");
++    }
++    if (!product.empty())
++    {
++        std::string revision = OsReleaseField("OPENWRT_DEVICE_REVISION");
++        std::ostringstream hardware;
++        hardware << product;
++        if (!revision.empty())
++        {
++            hardware << " (" << revision << ")";
++        }
++        mHardware = hardware.str();
++    }
++
++    DeviceLayer::SetDeviceInstanceInfoProvider(this);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::CopyOrDelegate(
++    const std::string & value, char * buf, size_t bufSize,
++    CHIP_ERROR (DeviceLayer::DeviceInstanceInfoProvider::*fallback)(char *, size_t))
++{
++    if (!value.empty())
++    {
++        VerifyOrReturnError(value.size() < bufSize, CHIP_ERROR_BUFFER_TOO_SMALL);
++        Platform::CopyString(buf, bufSize, value.c_str());
++        return CHIP_NO_ERROR;
++    }
++    VerifyOrReturnError(mFallback != nullptr, CHIP_ERROR_INCORRECT_STATE);
++    return (mFallback->*fallback)(buf, bufSize);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetVendorName(char * buf, size_t bufSize)
++{
++    return CopyOrDelegate(mVendorName, buf, bufSize, &DeviceLayer::DeviceInstanceInfoProvider::GetVendorName);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetProductURL(char * buf, size_t bufSize)
++{
++    return CopyOrDelegate(mProductUrl, buf, bufSize, &DeviceLayer::DeviceInstanceInfoProvider::GetProductURL);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetHardwareVersionString(char * buf, size_t bufSize)
++{
++    return CopyOrDelegate(mHardware, buf, bufSize, &DeviceLayer::DeviceInstanceInfoProvider::GetHardwareVersionString);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetVendorId(uint16_t & vendorId)
++{
++    return mFallback->GetVendorId(vendorId);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetProductName(char * buf, size_t bufSize)
++{
++    return mFallback->GetProductName(buf, bufSize);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetProductId(uint16_t & productId)
++{
++    return mFallback->GetProductId(productId);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetPartNumber(char * buf, size_t bufSize)
++{
++    return mFallback->GetPartNumber(buf, bufSize);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetProductLabel(char * buf, size_t bufSize)
++{
++    return mFallback->GetProductLabel(buf, bufSize);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetSerialNumber(char * buf, size_t bufSize)
++{
++    return mFallback->GetSerialNumber(buf, bufSize);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetManufacturingDate(uint16_t & year, uint8_t & month, uint8_t & day)
++{
++    return mFallback->GetManufacturingDate(year, month, day);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetHardwareVersion(uint16_t & hardwareVersion)
++{
++    return mFallback->GetHardwareVersion(hardwareVersion);
++}
++
++CHIP_ERROR NimInstanceInfoProvider::GetRotatingDeviceIdUniqueId(MutableByteSpan & uniqueIdSpan)
++{
++    return mFallback->GetRotatingDeviceIdUniqueId(uniqueIdSpan);
++}
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/NimInstanceInfo.h b/examples/network-manager-app/linux/NimInstanceInfo.h
+new file mode 100644
+index 0000000000..d4c907cd76
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimInstanceInfo.h
+@@ -0,0 +1,66 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#pragma once
++
++#include <platform/DeviceInstanceInfoProvider.h>
++
++#include <string>
++
++namespace chip {
++
++// A router's identity is in its firmware, not in whoever compiled this
++// daemon: OpenWrt publishes the device manufacturer and product in
++// /etc/os-release and /tmp/sysinfo on every board. Serving Basic
++// Information from there makes a commissioned router introduce itself as
++// the hardware it is, on any OpenWrt device, without per-device builds.
++class NimInstanceInfoProvider : public DeviceLayer::DeviceInstanceInfoProvider
++{
++public:
++    static NimInstanceInfoProvider & Instance();
++
++    // Reads the firmware identity and installs this provider in front of
++    // the platform one. Call after the stack is initialised.
++    void Init();
++
++    // Overrides the firmware's manufacturer string (uci option).
++    void SetVendorName(const char * name) { mVendorName = name; }
++
++    CHIP_ERROR GetVendorName(char * buf, size_t bufSize) override;
++    CHIP_ERROR GetVendorId(uint16_t & vendorId) override;
++    CHIP_ERROR GetProductName(char * buf, size_t bufSize) override;
++    CHIP_ERROR GetProductId(uint16_t & productId) override;
++    CHIP_ERROR GetPartNumber(char * buf, size_t bufSize) override;
++    CHIP_ERROR GetProductURL(char * buf, size_t bufSize) override;
++    CHIP_ERROR GetProductLabel(char * buf, size_t bufSize) override;
++    CHIP_ERROR GetSerialNumber(char * buf, size_t bufSize) override;
++    CHIP_ERROR GetManufacturingDate(uint16_t & year, uint8_t & month, uint8_t & day) override;
++    CHIP_ERROR GetHardwareVersion(uint16_t & hardwareVersion) override;
++    CHIP_ERROR GetHardwareVersionString(char * buf, size_t bufSize) override;
++    CHIP_ERROR GetRotatingDeviceIdUniqueId(MutableByteSpan & uniqueIdSpan) override;
++
++private:
++    CHIP_ERROR CopyOrDelegate(const std::string & value, char * buf, size_t bufSize,
++                              CHIP_ERROR (DeviceLayer::DeviceInstanceInfoProvider::*fallback)(char *, size_t));
++
++    DeviceLayer::DeviceInstanceInfoProvider * mFallback = nullptr;
++    std::string mVendorName;
++    std::string mProductUrl;
++    std::string mHardware;
++};
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+index 297f7e41b0..f5ae5a61f9 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+@@ -275,6 +275,10 @@ void OpenThreadUbusBorderRouterDelegate::OnDataReceived(blob_attr * msg, bool no
+             {
+                 mAttributeChangeCallback->ReportAttributeChanged(ActiveDatasetTimestamp::Id);
+             }
++            if (mDatasetObserver != nullptr && !mActiveDataset.IsEmpty())
++            {
++                mDatasetObserver(mDatasetObserverContext, mActiveDataset);
++            }
+         }
+     }
+ 
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+index c2098536c9..2f655242f6 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+@@ -27,10 +27,25 @@ namespace chip {
+ class OpenThreadUbusBorderRouterDelegate final : public app::Clusters::ThreadBorderRouterManagement::Delegate
+ {
+ public:
++    using ActiveDatasetObserver = void (*)(void * context, const Thread::OperationalDataset & dataset);
++
+     OpenThreadUbusBorderRouterDelegate(ubus::UbusManager & ubusManager) : mUbusManager(ubusManager) {}
+ 
+     CHIP_ERROR Init(AttributeChangeCallback * attributeChangeCallback) override;
+ 
++    // Called whenever a (non-empty) active dataset is received from otbr,
++    // both for the initial snapshot and for later changes. A snapshot that
++    // arrived before the observer was set is replayed immediately.
++    void SetActiveDatasetObserver(ActiveDatasetObserver observer, void * context)
++    {
++        mDatasetObserver        = observer;
++        mDatasetObserverContext = context;
++        if (observer != nullptr && !mActiveDataset.IsEmpty())
++        {
++            observer(context, mActiveDataset);
++        }
++    }
++
+     void GetBorderRouterName(MutableCharSpan & borderRouterName) override;
+     CHIP_ERROR GetBorderAgentId(MutableByteSpan & borderAgentId) override;
+     uint16_t GetThreadVersion() override;
+@@ -57,6 +72,8 @@ private:
+     CHIP_ERROR InvokeWithDataset(const char * method, const Thread::OperationalDataset & dataset);
+ 
+     AttributeChangeCallback * mAttributeChangeCallback;
++    ActiveDatasetObserver mDatasetObserver = nullptr;
++    void * mDatasetObserverContext         = nullptr;
+ 
+     ubus::UbusManager & mUbusManager;
+     ubus::UbusWatch mOtbr{ "otbr", this };
+diff --git a/examples/network-manager-app/linux/ThreadDiagnosticsUbus.cpp b/examples/network-manager-app/linux/ThreadDiagnosticsUbus.cpp
+new file mode 100644
+index 0000000000..08e93ebde0
+--- /dev/null
++++ b/examples/network-manager-app/linux/ThreadDiagnosticsUbus.cpp
+@@ -0,0 +1,347 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#include "ThreadDiagnosticsUbus.h"
++
++#include "UboxUtils.h"
++
++#include <clusters/ThreadNetworkDiagnostics/Attributes.h>
++#include <clusters/ThreadNetworkDiagnostics/Structs.h>
++#include <lib/support/CodeUtils.h>
++
++#include <libubus.h>
++#include <stdlib.h>
++#include <string.h>
++#include <vector>
++
++using namespace chip::ubus;
++using namespace chip::app::Clusters::ThreadNetworkDiagnostics;
++
++namespace chip {
++
++namespace {
++
++constexpr int kInvokeTimeout = 1000;
++
++RoutingRoleEnum RoleFromString(const char * role)
++{
++    VerifyOrReturnValue(role != nullptr, RoutingRoleEnum::kUnspecified);
++    if (strcmp(role, "detached") == 0)
++    {
++        return RoutingRoleEnum::kUnassigned;
++    }
++    if (strcmp(role, "child") == 0)
++    {
++        // The ubus API does not distinguish sleepy end devices; as a border
++        // router this device is never one anyway.
++        return RoutingRoleEnum::kEndDevice;
++    }
++    if (strcmp(role, "router") == 0)
++    {
++        return RoutingRoleEnum::kRouter;
++    }
++    if (strcmp(role, "leader") == 0)
++    {
++        return RoutingRoleEnum::kLeader;
++    }
++    return RoutingRoleEnum::kUnspecified;
++}
++
++// Numeric fields of the neighbor list arrive as (space-padded) strings.
++long ParseNumber(const char * value, int base = 10)
++{
++    return value != nullptr ? strtol(value, nullptr, base) : 0;
++}
++
++uint64_t ParseHex64(const char * value)
++{
++    return value != nullptr ? strtoull(value, nullptr, 16) : 0;
++}
++
++} // namespace
++
++CHIP_ERROR OtbrThreadNetworkDiagnosticsProvider::Init()
++{
++    mOtbr.SetResolvedCallback([](UbusWatch & watch, void * appState) {
++        auto * self = static_cast<OtbrThreadNetworkDiagnosticsProvider *>(appState);
++        ubus_invoke(&self->mUbusManager.Context(), watch.ObjectID(), "status", nullptr,
++                    ([](ubus_request * req, int type, blob_attr * msg) {
++                        static_cast<OtbrThreadNetworkDiagnosticsProvider *>(req->priv)->OnDataReceived(msg);
++                    }),
++                    self, kInvokeTimeout);
++    });
++    mOtbr.SetNotificationCallback([](UbusWatch & watch, void * appState, ubus_request_data * req, const char * notification,
++                                     blob_attr * msg) { static_cast<OtbrThreadNetworkDiagnosticsProvider *>(appState)->OnDataReceived(msg); });
++    mUbusManager.Register(mOtbr);
++    return CHIP_NO_ERROR;
++}
++
++void OtbrThreadNetworkDiagnosticsProvider::OnDataReceived(blob_attr * msg)
++{
++    BlobMsgField<const char *, CHIP_CTST("DeviceRole")> deviceRole;
++    BlobMsgField<ByteSpan, CHIP_CTST("ActiveDataset")> activeDataset;
++    BlobMsgParse(msg, deviceRole, activeDataset);
++
++    if (deviceRole.has_value())
++    {
++        mRole = RoleFromString(deviceRole.value());
++    }
++
++    if (activeDataset.has_value())
++    {
++        Thread::OperationalDatasetView dataset;
++        if (dataset.Init(activeDataset.value()) == CHIP_NO_ERROR)
++        {
++            mActiveDataset = dataset;
++        }
++    }
++}
++
++CHIP_ERROR OtbrThreadNetworkDiagnosticsProvider::ReadAttribute(AttributeId attributeId, app::AttributeValueEncoder & encoder)
++{
++    switch (attributeId)
++    {
++    case Attributes::RoutingRole::Id:
++        return encoder.Encode(mRole);
++
++    case Attributes::Channel::Id:
++    case Attributes::NetworkName::Id:
++    case Attributes::PanId::Id:
++    case Attributes::ExtendedPanId::Id:
++    case Attributes::MeshLocalPrefix::Id:
++    case Attributes::ActiveTimestamp::Id:
++    case Attributes::OperationalDatasetComponents::Id:
++        return EncodeFromDataset(attributeId, encoder);
++
++    case Attributes::PartitionId::Id:
++    case Attributes::Weighting::Id:
++    case Attributes::DataVersion::Id:
++    case Attributes::StableDataVersion::Id:
++    case Attributes::LeaderRouterId::Id:
++        return EncodeLeaderData(attributeId, encoder);
++
++    case Attributes::Rloc16::Id:
++        return EncodeRloc16(encoder);
++
++    case Attributes::NeighborTable::Id:
++        return EncodeNeighborTable(encoder);
++
++    case Attributes::RouteTable::Id:
++    case Attributes::ActiveNetworkFaultsList::Id:
++        return encoder.EncodeEmptyList();
++
++    // Nullable attributes without a ubus source.
++    case Attributes::PendingTimestamp::Id:
++    case Attributes::Delay::Id:
++    case Attributes::SecurityPolicy::Id:
++    case Attributes::ChannelPage0Mask::Id:
++    case Attributes::ExtAddress::Id:
++        return encoder.EncodeNull();
++
++    default:
++        // The remaining attributes are counters; the ubus API tracks none.
++        return encoder.Encode<uint32_t>(0u);
++    }
++}
++
++CHIP_ERROR OtbrThreadNetworkDiagnosticsProvider::EncodeFromDataset(AttributeId attributeId, app::AttributeValueEncoder & encoder)
++{
++    VerifyOrReturnValue(!mActiveDataset.IsEmpty(), encoder.EncodeNull());
++
++    switch (attributeId)
++    {
++    case Attributes::Channel::Id: {
++        uint16_t channel;
++        VerifyOrReturnValue(mActiveDataset.GetChannel(channel) == CHIP_NO_ERROR, encoder.EncodeNull());
++        return encoder.Encode(channel);
++    }
++    case Attributes::NetworkName::Id: {
++        char name[Thread::kSizeNetworkName + 1];
++        VerifyOrReturnValue(mActiveDataset.GetNetworkName(name) == CHIP_NO_ERROR, encoder.EncodeNull());
++        return encoder.Encode(CharSpan::fromCharString(name));
++    }
++    case Attributes::PanId::Id: {
++        uint16_t panId;
++        VerifyOrReturnValue(mActiveDataset.GetPanId(panId) == CHIP_NO_ERROR, encoder.EncodeNull());
++        return encoder.Encode(panId);
++    }
++    case Attributes::ExtendedPanId::Id: {
++        uint64_t extPanId;
++        VerifyOrReturnValue(mActiveDataset.GetExtendedPanId(extPanId) == CHIP_NO_ERROR, encoder.EncodeNull());
++        return encoder.Encode(extPanId);
++    }
++    case Attributes::MeshLocalPrefix::Id: {
++        uint8_t prefix[Thread::kSizeMeshLocalPrefix];
++        VerifyOrReturnValue(mActiveDataset.GetMeshLocalPrefix(prefix) == CHIP_NO_ERROR, encoder.EncodeNull());
++        return encoder.Encode(ByteSpan(prefix));
++    }
++    case Attributes::ActiveTimestamp::Id: {
++        uint64_t timestamp;
++        VerifyOrReturnValue(mActiveDataset.GetActiveTimestamp(timestamp) == CHIP_NO_ERROR, encoder.EncodeNull());
++        return encoder.Encode(timestamp);
++    }
++    case Attributes::OperationalDatasetComponents::Id: {
++        Structs::OperationalDatasetComponents::Type components;
++        uint64_t u64;
++        uint32_t u32;
++        uint16_t u16;
++        char name[Thread::kSizeNetworkName + 1];
++        uint8_t extPanId[Thread::kSizeExtendedPanId];
++        uint8_t prefix[Thread::kSizeMeshLocalPrefix];
++        uint8_t key[Thread::kSizeMasterKey];
++        uint8_t pskc[Thread::kSizePSKc];
++        ByteSpan mask;
++
++        components.activeTimestampPresent  = (mActiveDataset.GetActiveTimestamp(u64) == CHIP_NO_ERROR);
++        components.pendingTimestampPresent = false;
++        components.masterKeyPresent        = (mActiveDataset.GetMasterKey(key) == CHIP_NO_ERROR);
++        components.networkNamePresent      = (mActiveDataset.GetNetworkName(name) == CHIP_NO_ERROR);
++        components.extendedPanIdPresent    = (mActiveDataset.GetExtendedPanId(extPanId) == CHIP_NO_ERROR);
++        components.meshLocalPrefixPresent  = (mActiveDataset.GetMeshLocalPrefix(prefix) == CHIP_NO_ERROR);
++        components.delayPresent            = (mActiveDataset.GetDelayTimer(u32) == CHIP_NO_ERROR);
++        components.panIdPresent            = (mActiveDataset.GetPanId(u16) == CHIP_NO_ERROR);
++        components.channelPresent          = (mActiveDataset.GetChannel(u16) == CHIP_NO_ERROR);
++        components.pskcPresent             = (mActiveDataset.GetPSKc(pskc) == CHIP_NO_ERROR);
++        components.securityPolicyPresent   = (mActiveDataset.GetSecurityPolicy(u32) == CHIP_NO_ERROR);
++        components.channelMaskPresent      = (mActiveDataset.GetChannelMask(mask) == CHIP_NO_ERROR);
++        return encoder.Encode(components);
++    }
++    default:
++        return CHIP_ERROR_INVALID_ARGUMENT;
++    }
++}
++
++CHIP_ERROR OtbrThreadNetworkDiagnosticsProvider::EncodeLeaderData(AttributeId attributeId, app::AttributeValueEncoder & encoder)
++{
++    struct LeaderData
++    {
++        BlobMsgField<uint32_t, CHIP_CTST("PartitionId")> partitionId;
++        BlobMsgField<uint32_t, CHIP_CTST("Weighting")> weighting;
++        BlobMsgField<uint32_t, CHIP_CTST("DataVersion")> dataVersion;
++        BlobMsgField<uint32_t, CHIP_CTST("StableDataVersion")> stableDataVersion;
++        BlobMsgField<uint32_t, CHIP_CTST("LeaderRouterId")> leaderRouterId;
++        bool valid = false;
++    } data;
++
++    VerifyOrReturnValue(mOtbr.Resolved(), encoder.EncodeNull());
++    ubus_invoke(&mUbusManager.Context(), mOtbr.ObjectID(), "leaderdata", nullptr,
++                ([](ubus_request * req, int type, blob_attr * msg) {
++                    auto * out = static_cast<LeaderData *>(req->priv);
++                    // The reply nests the values in a "leaderdata" table.
++                    blob_attr * values[1];
++                    static constexpr blobmsg_policy policy[] = { { .name = "leaderdata", .type = BLOBMSG_TYPE_TABLE } };
++                    VerifyOrReturn(!blobmsg_parse_attr(policy, 1, values, msg) && values[0] != nullptr);
++                    out->valid = BlobMsgParse(values[0], out->partitionId, out->weighting, out->dataVersion,
++                                              out->stableDataVersion, out->leaderRouterId);
++                }),
++                &data, kInvokeTimeout);
++    VerifyOrReturnValue(data.valid, encoder.EncodeNull());
++
++    switch (attributeId)
++    {
++    case Attributes::PartitionId::Id:
++        return encoder.Encode(data.partitionId.value_or(0));
++    case Attributes::Weighting::Id:
++        return encoder.Encode(static_cast<uint16_t>(data.weighting.value_or(0)));
++    case Attributes::DataVersion::Id:
++        return encoder.Encode(static_cast<uint16_t>(data.dataVersion.value_or(0)));
++    case Attributes::StableDataVersion::Id:
++        return encoder.Encode(static_cast<uint16_t>(data.stableDataVersion.value_or(0)));
++    case Attributes::LeaderRouterId::Id:
++        return encoder.Encode(static_cast<uint8_t>(data.leaderRouterId.value_or(0)));
++    default:
++        return CHIP_ERROR_INVALID_ARGUMENT;
++    }
++}
++
++CHIP_ERROR OtbrThreadNetworkDiagnosticsProvider::EncodeRloc16(app::AttributeValueEncoder & encoder)
++{
++    struct Rloc
++    {
++        long value = -1;
++    } rloc;
++
++    VerifyOrReturnValue(mOtbr.Resolved(), encoder.EncodeNull());
++    ubus_invoke(&mUbusManager.Context(), mOtbr.ObjectID(), "rloc16", nullptr,
++                ([](ubus_request * req, int type, blob_attr * msg) {
++                    BlobMsgField<const char *, CHIP_CTST("rloc16")> value;
++                    VerifyOrReturn(BlobMsgParse(msg, value) && value.has_value());
++                    static_cast<Rloc *>(req->priv)->value = ParseNumber(value.value(), 16);
++                }),
++                &rloc, kInvokeTimeout);
++    VerifyOrReturnValue(rloc.value >= 0, encoder.EncodeNull());
++    return encoder.Encode(static_cast<uint16_t>(rloc.value));
++}
++
++CHIP_ERROR OtbrThreadNetworkDiagnosticsProvider::EncodeNeighborTable(app::AttributeValueEncoder & encoder)
++{
++    // Fetched up front: the list encoder may run its closure more than once
++    // when chunking, so the data must not change between passes.
++    std::vector<Structs::NeighborTableStruct::Type> neighbors;
++
++    VerifyOrReturnValue(mOtbr.Resolved(), encoder.EncodeEmptyList());
++    ubus_invoke(&mUbusManager.Context(), mOtbr.ObjectID(), "neighbor", nullptr,
++                ([](ubus_request * req, int type, blob_attr * msg) {
++                    auto & out = *static_cast<std::vector<Structs::NeighborTableStruct::Type> *>(req->priv);
++                    blob_attr * values[1];
++                    static constexpr blobmsg_policy policy[] = { { .name = "neighbor_list", .type = BLOBMSG_TYPE_ARRAY } };
++                    VerifyOrReturn(!blobmsg_parse_attr(policy, 1, values, msg) && values[0] != nullptr);
++
++                    blob_attr * cur;
++                    size_t rem;
++                    blobmsg_for_each_attr(cur, values[0], rem)
++                    {
++                        if (blobmsg_type(cur) != BLOBMSG_TYPE_TABLE)
++                            continue;
++                        BlobMsgField<const char *, CHIP_CTST("Role")> role;
++                        BlobMsgField<const char *, CHIP_CTST("Rloc16")> rloc16;
++                        BlobMsgField<const char *, CHIP_CTST("Age")> age;
++                        BlobMsgField<const char *, CHIP_CTST("AvgRssi")> avgRssi;
++                        BlobMsgField<const char *, CHIP_CTST("LastRssi")> lastRssi;
++                        BlobMsgField<const char *, CHIP_CTST("Mode")> mode;
++                        BlobMsgField<const char *, CHIP_CTST("ExtAddress")> extAddress;
++                        BlobMsgField<uint16_t, CHIP_CTST("LinkQualityIn")> lqi;
++                        if (!BlobMsgParse(cur, role, rloc16, age, avgRssi, lastRssi, mode, extAddress, lqi))
++                            continue;
++
++                        Structs::NeighborTableStruct::Type neighbor;
++                        neighbor.extAddress       = ParseHex64(extAddress.value_or(nullptr));
++                        neighbor.age              = static_cast<uint32_t>(ParseNumber(age.value_or(nullptr)));
++                        neighbor.rloc16           = static_cast<uint16_t>(ParseNumber(rloc16.value_or(nullptr), 16));
++                        neighbor.lqi              = static_cast<uint8_t>(lqi.value_or(0));
++                        neighbor.averageRssi.SetNonNull(static_cast<int8_t>(ParseNumber(avgRssi.value_or(nullptr))));
++                        neighbor.lastRssi.SetNonNull(static_cast<int8_t>(ParseNumber(lastRssi.value_or(nullptr))));
++                        const char * modeFlags    = mode.value_or("");
++                        neighbor.rxOnWhenIdle     = (strchr(modeFlags, 'r') != nullptr);
++                        neighbor.fullThreadDevice = (strchr(modeFlags, 'd') != nullptr);
++                        neighbor.fullNetworkData  = (strchr(modeFlags, 'n') != nullptr);
++                        neighbor.isChild          = (role.has_value() && strcmp(role.value(), "C") == 0);
++                        out.push_back(neighbor);
++                    }
++                }),
++                &neighbors, kInvokeTimeout);
++
++    return encoder.EncodeList([&neighbors](const auto & listEncoder) -> CHIP_ERROR {
++        for (const auto & neighbor : neighbors)
++        {
++            ReturnErrorOnFailure(listEncoder.Encode(neighbor));
++        }
++        return CHIP_NO_ERROR;
++    });
++}
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/ThreadDiagnosticsUbus.h b/examples/network-manager-app/linux/ThreadDiagnosticsUbus.h
+new file mode 100644
+index 0000000000..ddf463d7e6
+--- /dev/null
++++ b/examples/network-manager-app/linux/ThreadDiagnosticsUbus.h
+@@ -0,0 +1,62 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#pragma once
++
++#include "UbusManager.h"
++#include <app/clusters/thread-network-diagnostics-server/ThreadNetworkDiagnosticsProvider.h>
++#include <clusters/ThreadNetworkDiagnostics/Enums.h>
++#include <lib/support/ThreadOperationalDataset.h>
++
++struct blob_attr;
++
++namespace chip {
++
++// Serves the Thread Network Diagnostics cluster from otbr-agent's ubus API:
++// this application runs no in-process Thread stack, so the direct provider
++// would report an unprovisioned device. Dataset-derived attributes and the
++// routing role are cached from otbr's status snapshot and notifications;
++// volatile values (leader data, RLOC16, the neighbor table) are fetched at
++// read time. Attributes without a ubus source encode null or empty.
++class OtbrThreadNetworkDiagnosticsProvider final : public app::Clusters::ThreadNetworkDiagnostics::ThreadNetworkDiagnosticsProvider
++{
++public:
++    OtbrThreadNetworkDiagnosticsProvider(ubus::UbusManager & ubusManager) : mUbusManager(ubusManager) {}
++
++    CHIP_ERROR Init();
++
++    CHIP_ERROR ReadAttribute(AttributeId attributeId, app::AttributeValueEncoder & encoder) override;
++    // The ubus API tracks no diagnostic counters, so there is nothing to reset.
++    void ResetCounts() override {}
++
++private:
++    void OnDataReceived(blob_attr * msg);
++
++    CHIP_ERROR EncodeFromDataset(AttributeId attributeId, app::AttributeValueEncoder & encoder);
++    CHIP_ERROR EncodeLeaderData(AttributeId attributeId, app::AttributeValueEncoder & encoder);
++    CHIP_ERROR EncodeRloc16(app::AttributeValueEncoder & encoder);
++    CHIP_ERROR EncodeNeighborTable(app::AttributeValueEncoder & encoder);
++
++    ubus::UbusManager & mUbusManager;
++    ubus::UbusWatch mOtbr{ "otbr", this };
++
++    app::Clusters::ThreadNetworkDiagnostics::RoutingRoleEnum mRole =
++        app::Clusters::ThreadNetworkDiagnostics::RoutingRoleEnum::kUnspecified;
++    Thread::OperationalDataset mActiveDataset;
++};
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/UboxUtils.cpp b/examples/network-manager-app/linux/UboxUtils.cpp
+index f71ec2ccd6..95476fda4d 100644
+--- a/examples/network-manager-app/linux/UboxUtils.cpp
++++ b/examples/network-manager-app/linux/UboxUtils.cpp
+@@ -53,7 +53,8 @@ bool BlobMsgBuf::AddFormat(const char * name, const char * format, ...)
+     va_start(args, format);
+     int status = blobmsg_vprintf(this, name, format, args);
+     va_end(args);
+-    return Check(status);
++    // blobmsg_vprintf returns the formatted length, not 0, on success.
++    return Check(status >= 0 ? 0 : status);
+ }
+ 
+ } // namespace ubus
+diff --git a/examples/network-manager-app/linux/UboxUtils.h b/examples/network-manager-app/linux/UboxUtils.h
+index 53c998b21f..87450c0d9a 100644
+--- a/examples/network-manager-app/linux/UboxUtils.h
++++ b/examples/network-manager-app/linux/UboxUtils.h
+@@ -17,6 +17,7 @@
+ 
+ #pragma once
+ 
++#include <lib/support/CodeUtils.h>
+ #include <lib/support/CompileTimeString.h>
+ #include <lib/support/EnforceFormat.h>
+ #include <lib/support/Span.h>
+@@ -188,7 +189,14 @@ private:
+     struct Deleter
+     {
+         blob_buf * mBuf;
+-        void operator()(void * cookie) { blob_nest_end(mBuf, cookie); }
++        void operator()(void * cookie)
++        {
++            // An add that failed after this nest was opened cleared head to
++            // record the error; closing the nest would dereference it, and
++            // would also mask the error by restoring head.
++            VerifyOrReturn(mBuf->head != nullptr);
++            blob_nest_end(mBuf, cookie);
++        }
+     };
+ 
+     std::unique_ptr<void, Deleter> mCookie;
+diff --git a/examples/network-manager-app/linux/WiFiCredentialsUbus.cpp b/examples/network-manager-app/linux/WiFiCredentialsUbus.cpp
+new file mode 100644
+index 0000000000..878cd461df
+--- /dev/null
++++ b/examples/network-manager-app/linux/WiFiCredentialsUbus.cpp
+@@ -0,0 +1,251 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#include "WiFiCredentialsUbus.h"
++
++#include <lib/core/CHIPSafeCasts.h>
++#include <lib/support/CodeUtils.h>
++
++#include <libubus.h>
++#include <string.h>
++
++using namespace chip::ubus;
++
++namespace chip {
++
++namespace {
++
++constexpr int kInvokeTimeout = 2000;
++
++// network.wireless status: { "radio0": { "up": true, "disabled": false,
++//   "interfaces": [ { "section": "default_radio0", "config": { "mode": "ap",
++//   "ssid": ..., "key": ..., "encryption": ..., "network": [ "lan" ] } } ] } }
++
++enum
++{
++    RADIO_ATTR_UP,
++    RADIO_ATTR_DISABLED,
++    RADIO_ATTR_INTERFACES,
++    __RADIO_ATTR_MAX,
++};
++
++const blobmsg_policy kRadioPolicy[__RADIO_ATTR_MAX] = {
++    [RADIO_ATTR_UP]         = { .name = "up", .type = BLOBMSG_TYPE_BOOL },
++    [RADIO_ATTR_DISABLED]   = { .name = "disabled", .type = BLOBMSG_TYPE_BOOL },
++    [RADIO_ATTR_INTERFACES] = { .name = "interfaces", .type = BLOBMSG_TYPE_ARRAY },
++};
++
++enum
++{
++    IFACE_ATTR_SECTION,
++    IFACE_ATTR_CONFIG,
++    __IFACE_ATTR_MAX,
++};
++
++const blobmsg_policy kIfacePolicy[__IFACE_ATTR_MAX] = {
++    [IFACE_ATTR_SECTION] = { .name = "section", .type = BLOBMSG_TYPE_STRING },
++    [IFACE_ATTR_CONFIG]  = { .name = "config", .type = BLOBMSG_TYPE_TABLE },
++};
++
++enum
++{
++    CONFIG_ATTR_MODE,
++    CONFIG_ATTR_SSID,
++    CONFIG_ATTR_KEY,
++    CONFIG_ATTR_ENCRYPTION,
++    CONFIG_ATTR_NETWORK,
++    CONFIG_ATTR_DISABLED,
++    __CONFIG_ATTR_MAX,
++};
++
++const blobmsg_policy kConfigPolicy[__CONFIG_ATTR_MAX] = {
++    [CONFIG_ATTR_MODE]       = { .name = "mode", .type = BLOBMSG_TYPE_STRING },
++    [CONFIG_ATTR_SSID]       = { .name = "ssid", .type = BLOBMSG_TYPE_STRING },
++    [CONFIG_ATTR_KEY]        = { .name = "key", .type = BLOBMSG_TYPE_STRING },
++    [CONFIG_ATTR_ENCRYPTION] = { .name = "encryption", .type = BLOBMSG_TYPE_STRING },
++    [CONFIG_ATTR_NETWORK]    = { .name = "network", .type = BLOBMSG_TYPE_ARRAY },
++    [CONFIG_ATTR_DISABLED]   = { .name = "disabled", .type = BLOBMSG_TYPE_BOOL },
++};
++
++bool ArrayContainsString(blob_attr * array, const char * value)
++{
++    blob_attr * cur;
++    size_t rem;
++    VerifyOrReturnValue(array != nullptr, false);
++    blobmsg_for_each_attr(cur, array, rem)
++    {
++        if (blobmsg_type(cur) == BLOBMSG_TYPE_STRING && strcmp(blobmsg_get_string(cur), value) == 0)
++        {
++            return true;
++        }
++    }
++    return false;
++}
++
++// The passphrase is only meaningful for WPA-Personal style encryption
++// (psk, psk2, psk-mixed, sae, sae-mixed, ...). Open networks and
++// WPA-Enterprise have no shareable passphrase.
++bool IsPersonalEncryption(const char * encryption)
++{
++    return encryption != nullptr && (strncmp(encryption, "psk", 3) == 0 || strncmp(encryption, "sae", 3) == 0);
++}
++
++} // namespace
++
++CHIP_ERROR WiFiCredentialsUbusProvider::Init(const char * network, const char * section)
++{
++    mNetworkName  = network;
++    mIfaceSection = section;
++
++    mWireless.SetResolvedCallback([](UbusWatch & watch, void * appState) {
++        static_cast<WiFiCredentialsUbusProvider *>(appState)->Refresh();
++    });
++    mWireless.SetLostCallback([](UbusWatch & watch, void * appState) {
++        // netifd going away takes the credentials' source of truth with it;
++        // keep the last known state rather than clearing a working AP.
++    });
++    mUbusManager.Register(mWireless);
++
++    return CHIP_NO_ERROR;
++}
++
++void WiFiCredentialsUbusProvider::Refresh()
++{
++    VerifyOrReturn(mWireless.Resolved());
++    ubus_invoke(&mUbusManager.Context(), mWireless.ObjectID(), "status", nullptr,
++                ([](ubus_request * req, int type, blob_attr * msg) {
++                    static_cast<WiFiCredentialsUbusProvider *>(req->priv)->OnStatus(msg);
++                }),
++                this, kInvokeTimeout);
++}
++
++void WiFiCredentialsUbusProvider::OnStatus(blob_attr * msg)
++{
++    blob_attr * section = nullptr;
++    blob_attr * config  = nullptr;
++    if (SelectAccessPoint(msg, section, config))
++    {
++        ChipLogProgress(AppServer, "Sharing Wi-Fi credentials of '%s'", blobmsg_get_string(section));
++        Apply(config);
++    }
++    else
++    {
++        ChipLogProgress(AppServer, "No shareable Wi-Fi access point on network '%s'", mNetworkName);
++        Apply(nullptr);
++    }
++}
++
++bool WiFiCredentialsUbusProvider::SelectAccessPoint(blob_attr * radios, blob_attr *& section, blob_attr *& config)
++{
++    blob_attr * radio;
++    size_t radioRem;
++    VerifyOrReturnValue(radios != nullptr, false);
++
++    blobmsg_for_each_attr(radio, radios, radioRem)
++    {
++        // Plain ifs: continue inside VerifyOrDo would bind to the macro's
++        // own do-while and silently fall through instead.
++        if (blobmsg_type(radio) != BLOBMSG_TYPE_TABLE)
++            continue;
++
++        blob_attr * radioAttrs[__RADIO_ATTR_MAX];
++        if (blobmsg_parse_attr(kRadioPolicy, __RADIO_ATTR_MAX, radioAttrs, radio) != 0)
++            continue;
++        if (radioAttrs[RADIO_ATTR_INTERFACES] == nullptr)
++            continue;
++        if (radioAttrs[RADIO_ATTR_UP] == nullptr || !blobmsg_get_u8(radioAttrs[RADIO_ATTR_UP]))
++            continue;
++        if (radioAttrs[RADIO_ATTR_DISABLED] != nullptr && blobmsg_get_u8(radioAttrs[RADIO_ATTR_DISABLED]))
++            continue;
++
++        blob_attr * iface;
++        size_t ifaceRem;
++        blobmsg_for_each_attr(iface, radioAttrs[RADIO_ATTR_INTERFACES], ifaceRem)
++        {
++            if (blobmsg_type(iface) != BLOBMSG_TYPE_TABLE)
++                continue;
++
++            blob_attr * ifaceAttrs[__IFACE_ATTR_MAX];
++            if (blobmsg_parse_attr(kIfacePolicy, __IFACE_ATTR_MAX, ifaceAttrs, iface) != 0)
++                continue;
++            if (ifaceAttrs[IFACE_ATTR_SECTION] == nullptr || ifaceAttrs[IFACE_ATTR_CONFIG] == nullptr)
++                continue;
++
++            blob_attr * configAttrs[__CONFIG_ATTR_MAX];
++            if (blobmsg_parse_attr(kConfigPolicy, __CONFIG_ATTR_MAX, configAttrs, ifaceAttrs[IFACE_ATTR_CONFIG]) != 0)
++                continue;
++
++            // Only access points have credentials to share; a sta iface's key
++            // belongs to somebody else's network.
++            if (configAttrs[CONFIG_ATTR_MODE] == nullptr ||
++                strcmp(blobmsg_get_string(configAttrs[CONFIG_ATTR_MODE]), "ap") != 0)
++                continue;
++            if (configAttrs[CONFIG_ATTR_DISABLED] != nullptr && blobmsg_get_u8(configAttrs[CONFIG_ATTR_DISABLED]))
++                continue;
++
++            if (mIfaceSection != nullptr)
++            {
++                if (strcmp(blobmsg_get_string(ifaceAttrs[IFACE_ATTR_SECTION]), mIfaceSection) != 0)
++                    continue;
++            }
++            else if (!ArrayContainsString(configAttrs[CONFIG_ATTR_NETWORK], mNetworkName))
++            {
++                continue;
++            }
++
++            section = ifaceAttrs[IFACE_ATTR_SECTION];
++            config  = ifaceAttrs[IFACE_ATTR_CONFIG];
++            return true;
++        }
++    }
++    return false;
++}
++
++void WiFiCredentialsUbusProvider::Apply(blob_attr * config)
++{
++    const char * ssid       = nullptr;
++    const char * key        = nullptr;
++    const char * encryption = nullptr;
++
++    if (config != nullptr)
++    {
++        blob_attr * configAttrs[__CONFIG_ATTR_MAX];
++        if (!blobmsg_parse_attr(kConfigPolicy, __CONFIG_ATTR_MAX, configAttrs, config))
++        {
++            ssid       = configAttrs[CONFIG_ATTR_SSID] ? blobmsg_get_string(configAttrs[CONFIG_ATTR_SSID]) : nullptr;
++            key        = configAttrs[CONFIG_ATTR_KEY] ? blobmsg_get_string(configAttrs[CONFIG_ATTR_KEY]) : nullptr;
++            encryption = configAttrs[CONFIG_ATTR_ENCRYPTION] ? blobmsg_get_string(configAttrs[CONFIG_ATTR_ENCRYPTION]) : nullptr;
++        }
++    }
++
++    CHIP_ERROR err;
++    if (ssid != nullptr && key != nullptr && IsPersonalEncryption(encryption))
++    {
++        err = mCluster.SetNetworkCredentials(ByteSpan(Uint8::from_const_char(ssid), strlen(ssid)),
++                                             ByteSpan(Uint8::from_const_char(key), strlen(key)));
++    }
++    else
++    {
++        err = mCluster.ClearNetworkCredentials();
++    }
++    if (err != CHIP_NO_ERROR)
++    {
++        ChipLogError(AppServer, "Updating Wi-Fi credentials failed: %" CHIP_ERROR_FORMAT, err.Format());
++    }
++}
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/WiFiCredentialsUbus.h b/examples/network-manager-app/linux/WiFiCredentialsUbus.h
+new file mode 100644
+index 0000000000..026aaf5c76
+--- /dev/null
++++ b/examples/network-manager-app/linux/WiFiCredentialsUbus.h
+@@ -0,0 +1,70 @@
++/*
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#pragma once
++
++#include "UbusManager.h"
++#include <app/clusters/wifi-network-management-server/WiFiNetworkManagementCluster.h>
++
++struct blob_attr;
++
++namespace chip {
++
++// Feeds the Wi-Fi Network Management cluster with the router's real access
++// point credentials, read from netifd over ubus (network.wireless status).
++//
++// The access point to share is selected automatically: the first AP-mode
++// interface on an enabled radio that is attached to the given network
++// (usually the LAN, which is where Matter devices belong - guest networks
++// are excluded by construction). A specific wifi-iface section can be
++// pinned instead to override the automatic choice.
++//
++// The cluster owns change detection: SetNetworkCredentials() no-ops on
++// identical values and bumps PassphraseSurrogate on change, so Refresh()
++// can be called freely (it is invoked from the "matter" ubus object's
++// reload_wifi method, triggered by procd on wireless config changes).
++class WiFiCredentialsUbusProvider final
++{
++public:
++    WiFiCredentialsUbusProvider(ubus::UbusManager & ubusManager,
++                                app::Clusters::WiFiNetworkManagementCluster & cluster) :
++        mUbusManager(ubusManager),
++        mCluster(cluster)
++    {}
++
++    // network: netifd interface name whose access point is shared (auto mode).
++    // section: optional uci wifi-iface section overriding the selection.
++    // The strings must outlive the provider.
++    CHIP_ERROR Init(const char * network, const char * section);
++
++    // Re-reads the wireless status and updates the cluster.
++    void Refresh();
++
++private:
++    void OnStatus(blob_attr * msg);
++    bool SelectAccessPoint(blob_attr * radios, blob_attr *& section, blob_attr *& config);
++    void Apply(blob_attr * config);
++
++    ubus::UbusManager & mUbusManager;
++    app::Clusters::WiFiNetworkManagementCluster & mCluster;
++    ubus::UbusWatch mWireless{ "network.wireless", this };
++
++    const char * mNetworkName  = nullptr;
++    const char * mIfaceSection = nullptr;
++};
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/main.cpp b/examples/network-manager-app/linux/main.cpp
+index 5b3e2c0d08..e7170d0f88 100644
+--- a/examples/network-manager-app/linux/main.cpp
++++ b/examples/network-manager-app/linux/main.cpp
+@@ -31,8 +31,12 @@
+ 
+ #if MATTER_ENABLE_UBUS
+ #include "MatterUbusService.h"
++#include "NimDiagnostics.h"
++#include "NimInstanceInfo.h"
+ #include "ThreadBROpenThreadUbus.h"
++#include "ThreadDiagnosticsUbus.h"
+ #include "UbusManager.h"
++#include "WiFiCredentialsUbus.h"
+ #else
+ #include "ThreadBRFake.h"
+ #endif
+@@ -51,6 +55,97 @@ ByteSpan ByteSpanFromCharSpan(CharSpan span)
+ #if MATTER_ENABLE_UBUS
+ ubus::UbusManager gUbusManager{};
+ MatterUbusService gMatterUbusService{ gUbusManager };
++std::optional<WiFiCredentialsUbusProvider> gWiFiCredentialsProvider;
++
++// The netifd network whose access point credentials the Wi-Fi Network
++// Management cluster shares, and an optional wifi-iface section override.
++const char * gWifiNetworkName  = "lan";
++const char * gWifiIfaceSection = nullptr;
++bool gThreadManaged            = true;
++
++// The interface this node is reachable on; drives the diagnostics report
++// and the identity the ethernet layers pick on this multi-homed host.
++const char * gPrimaryInterface = "br-lan";
++
++constexpr uint16_t kOptionWifiNetwork = 0x1001;
++constexpr uint16_t kOptionWifiIface   = 0x1002;
++constexpr uint16_t kOptionNoWifiShare = 0x1003;
++constexpr uint16_t kOptionNoThread    = 0x1004;
++constexpr uint16_t kOptionPrimaryIface = 0x1005;
++constexpr uint16_t kOptionVendorName   = 0x1006;
++constexpr uint16_t kOptionDiagIface    = 0x1007;
++constexpr uint16_t kOptionNoEthDiag    = 0x1008;
++
++bool HandleAppOption(const char * program, ArgParser::OptionSet * options, int identifier, const char * name, const char * value)
++{
++    switch (identifier)
++    {
++    case kOptionWifiNetwork:
++        gWifiNetworkName = value;
++        return true;
++    case kOptionWifiIface:
++        gWifiIfaceSection = value;
++        return true;
++    case kOptionNoWifiShare:
++        gWifiNetworkName  = nullptr;
++        gWifiIfaceSection = nullptr;
++        return true;
++    case kOptionNoThread:
++        gThreadManaged = false;
++        return true;
++    case kOptionPrimaryIface:
++        gPrimaryInterface = value;
++        setenv("CHIP_ETHERNET_INTERFACE", value, 1);
++        return true;
++    case kOptionVendorName:
++        NimInstanceInfoProvider::Instance().SetVendorName(value);
++        return true;
++    case kOptionDiagIface:
++        NimDiagnosticsProvider::Instance().SetDiagnosticsInterface(value);
++        return true;
++    case kOptionNoEthDiag:
++        NimDiagnosticsProvider::Instance().SetEthernetDiagnosticsEnabled(false);
++        return true;
++    default:
++        return false;
++    }
++}
++
++ArgParser::OptionDef sAppOptionDefs[] = {
++    { "wifi-network", ArgParser::kArgumentRequired, kOptionWifiNetwork },
++    { "wifi-iface", ArgParser::kArgumentRequired, kOptionWifiIface },
++    { "no-wifi-share", ArgParser::kNoArgument, kOptionNoWifiShare },
++    { "no-thread", ArgParser::kNoArgument, kOptionNoThread },
++    { "primary-interface", ArgParser::kArgumentRequired, kOptionPrimaryIface },
++    { "vendor-name", ArgParser::kArgumentRequired, kOptionVendorName },
++    { "diagnostics-interface", ArgParser::kArgumentRequired, kOptionDiagIface },
++    { "no-ethernet-diagnostics", ArgParser::kNoArgument, kOptionNoEthDiag },
++    {},
++};
++
++const char sAppOptionHelp[] = "  --wifi-network <name>\n"
++                              "       Share the Wi-Fi credentials of the access point attached to this\n"
++                              "       netifd network (default: lan).\n"
++                              "  --wifi-iface <section>\n"
++                              "       Share the Wi-Fi credentials of this uci wifi-iface section,\n"
++                              "       overriding the automatic selection.\n"
++                              "  --no-wifi-share\n"
++                              "       Do not share any Wi-Fi credentials.\n"
++                              "  --no-thread\n"
++                              "       No Thread border router is present: do not record or share\n"
++                              "       any Thread networks.\n"
++                              "  --primary-interface <name>\n"
++                              "       The interface this node is reachable on (default: br-lan).\n"
++                              "  --vendor-name <name>\n"
++                              "       Manufacturer reported in Basic Information, overriding the\n"
++                              "       one the firmware states in /etc/os-release.\n"
++                              "  --diagnostics-interface <name>\n"
++                              "       Feed the Ethernet diagnostics from this interface instead of\n"
++                              "       the primary one.\n"
++                              "  --no-ethernet-diagnostics\n"
++                              "       Report no Ethernet diagnostics at all.\n";
++
++ArgParser::OptionSet sAppOptions = { HandleAppOption, sAppOptionDefs, "APP OPTIONS", sAppOptionHelp };
+ #endif
+ 
+ std::optional<DefaultThreadNetworkDirectoryServer> gThreadNetworkDirectoryServer;
+@@ -67,17 +162,23 @@ void emberAfWiFiNetworkManagementClusterInitCallback(EndpointId endpoint)
+     TEMPORARY_RETURN_IGNORED gWiFiNetworkManagementServer.emplace(endpoint).Init();
+ }
+ 
++#if MATTER_ENABLE_UBUS
++std::optional<OpenThreadUbusBorderRouterDelegate> gBorderRouterDelegate;
++#else
++std::optional<FakeBorderRouterDelegate> gBorderRouterDelegate;
++#endif
++
+ std::optional<ThreadBorderRouterManagement::ServerInstance> gThreadBorderRouterManagementServer;
+ void emberAfThreadBorderRouterManagementClusterInitCallback(EndpointId endpoint)
+ {
+     VerifyOrDie(!gThreadBorderRouterManagementServer);
+ #if MATTER_ENABLE_UBUS
+-    static OpenThreadUbusBorderRouterDelegate delegate{ gUbusManager };
++    gBorderRouterDelegate.emplace(gUbusManager);
+ #else
+-    static FakeBorderRouterDelegate delegate{};
++    gBorderRouterDelegate.emplace();
+ #endif
+     TEMPORARY_RETURN_IGNORED gThreadBorderRouterManagementServer
+-        .emplace(endpoint, &delegate, Server::GetInstance().GetFailSafeContext())
++        .emplace(endpoint, &*gBorderRouterDelegate, Server::GetInstance().GetFailSafeContext())
+         .Init();
+ }
+ 
+@@ -102,21 +203,128 @@ void emberAfNetworkIdentityManagementClusterInitCallback(EndpointId endpoint)
+     SuccessOrDie(CodegenDataModelProvider::Instance().Registry().Register(gNetworkIdentityManagementCluster.Registration()));
+ }
+ 
++#if MATTER_ENABLE_UBUS
++std::optional<OtbrThreadNetworkDiagnosticsProvider> gThreadDiagnosticsProvider;
++#endif
++
+ static void ApplicationEarlyInit()
+ {
++#if MATTER_ENABLE_UBUS
++    NimDiagnosticsProvider::Instance().SetPrimaryInterface(gPrimaryInterface);
++    DeviceLayer::SetDiagnosticDataProvider(&NimDiagnosticsProvider::Instance());
++    NimInstanceInfoProvider::Instance().Init();
++#endif
+ #if MATTER_ENABLE_UBUS
+     SuccessOrDie(gUbusManager.Init());
++
++    // Must be in place before endpoint initialization constructs the
++    // Thread Network Diagnostics cluster: without an in-process Thread
++    // stack, the default provider would report an unprovisioned device.
++    gThreadDiagnosticsProvider.emplace(gUbusManager);
++    SuccessOrDie(gThreadDiagnosticsProvider->Init());
++    app::Clusters::ThreadNetworkDiagnostics::SetDefaultThreadNetworkDiagnosticsProvider(&*gThreadDiagnosticsProvider);
+ #endif
+ }
+ 
++#if MATTER_ENABLE_UBUS
++// Records the border router's own network in the Thread Network Directory,
++// so the directory answers with the network of the home it lives in even
++// before any controller has populated it. A dataset change (e.g. a PAN
++// migration) updates the entry; past networks deliberately stay listed.
++void SeedThreadNetworkDirectory(void * context, const Thread::OperationalDataset & dataset)
++{
++    ByteSpan extPanId;
++    VerifyOrReturn(gThreadNetworkDirectoryServer.has_value());
++    VerifyOrReturn(dataset.GetExtendedPanIdAsByteSpan(extPanId) == CHIP_NO_ERROR);
++    CHIP_ERROR err = gThreadNetworkDirectoryServer->Storage().AddOrUpdateNetwork(
++        ThreadNetworkDirectoryStorage::ExtendedPanId(extPanId), dataset.AsByteSpan());
++    if (err != CHIP_NO_ERROR)
++    {
++        ChipLogError(AppServer, "Seeding the Thread Network Directory failed: %" CHIP_ERROR_FORMAT, err.Format());
++    }
++}
++#endif
++
++// The directory is persisted, so networks recorded while a border router
++// was installed outlive it. Without one there is nothing to share, and a
++// stale entry would advertise a network this node can no longer reach.
++void ClearThreadNetworkDirectory()
++{
++    VerifyOrReturn(gThreadNetworkDirectoryServer.has_value());
++    auto & storage = gThreadNetworkDirectoryServer->Storage();
++
++    // Removing while iterating skips entries, so collect the ids first.
++    ThreadNetworkDirectoryStorage::ExtendedPanId ids[CHIP_CONFIG_MAX_THREAD_NETWORK_DIRECTORY_STORAGE_CAPACITY];
++    size_t count = 0;
++    {
++        auto * it = storage.IterateNetworkIds();
++        VerifyOrReturn(it != nullptr);
++        while (count < MATTER_ARRAY_SIZE(ids) && it->Next(ids[count]))
++        {
++            count++;
++        }
++        it->Release();
++    }
++
++    for (size_t i = 0; i < count; i++)
++    {
++        CHIP_ERROR err = storage.RemoveNetwork(ids[i]);
++        if (err != CHIP_NO_ERROR)
++        {
++            ChipLogError(AppServer, "Clearing the Thread Network Directory failed: %" CHIP_ERROR_FORMAT, err.Format());
++        }
++    }
++    if (count != 0)
++    {
++        ChipLogProgress(AppServer, "Cleared %u Thread network(s) from the directory", static_cast<unsigned>(count));
++    }
++}
++
+ void ApplicationInit()
+ {
+-    TEMPORARY_RETURN_IGNORED gWiFiNetworkManagementServer->SetNetworkCredentials(ByteSpanFromCharSpan("MatterAP"_span),
+-                                                                                 ByteSpanFromCharSpan("Setec Astronomy"_span));
+ #if MATTER_ENABLE_UBUS
++    // The cluster serves the router's real access point credentials, kept in
++    // sync from netifd; procd pokes reload_wifi on wireless config changes.
++    // An empty network name with no override disables sharing entirely: the
++    // cluster then never holds credentials, so SSID reads null and
++    // NetworkPassphraseRequest fails with InvalidInState.
++    if ((gWifiNetworkName != nullptr && gWifiNetworkName[0] != '\0') || gWifiIfaceSection != nullptr)
++    {
++        ChipLogProgress(AppServer, "Wi-Fi credential source: network '%s', iface override '%s'", gWifiNetworkName,
++                        gWifiIfaceSection != nullptr ? gWifiIfaceSection : "(none)");
++        gWiFiCredentialsProvider.emplace(gUbusManager, *gWiFiNetworkManagementServer);
++        SuccessOrDie(gWiFiCredentialsProvider->Init(gWifiNetworkName, gWifiIfaceSection));
++        gMatterUbusService.SetReloadWifiHandler(
++            [](void * context) { static_cast<WiFiCredentialsUbusProvider *>(context)->Refresh(); }, &*gWiFiCredentialsProvider);
++    }
++    else
++    {
++        ChipLogProgress(AppServer, "Wi-Fi credential sharing disabled");
++    }
++
++    if (gThreadManaged)
++    {
++        gBorderRouterDelegate->SetActiveDatasetObserver(SeedThreadNetworkDirectory, nullptr);
++    }
++    else
++    {
++        ClearThreadNetworkDirectory();
++    }
++
++    // Status sources for the ubus object: what the node currently shares.
++    gMatterUbusService.SetWiFiCluster(&*gWiFiNetworkManagementServer);
++    if (gThreadManaged && gThreadNetworkDirectoryServer.has_value())
++    {
++        gMatterUbusService.SetThreadDirectory(&gThreadNetworkDirectoryServer->Storage());
++    }
++
+     // Publish the "matter" ubus object once the server is up; its handlers
+     // read commissioning state owned by the server.
+     SuccessOrDie(gMatterUbusService.Init());
++#else
++    // Demo credentials for standalone testing without an OpenWrt backend.
++    TEMPORARY_RETURN_IGNORED gWiFiNetworkManagementServer->SetNetworkCredentials(ByteSpanFromCharSpan("MatterAP"_span),
++                                                                                 ByteSpanFromCharSpan("Setec Astronomy"_span));
+ #endif
+ }
+ 
+@@ -129,7 +337,14 @@ void ApplicationShutdown()
+ 
+ int main(int argc, char * argv[])
+ {
++#if MATTER_ENABLE_UBUS
++    // Must be in place before the stack caches its ethernet interface;
++    // --primary-interface overrides it during argument parsing.
++    setenv("CHIP_ETHERNET_INTERFACE", gPrimaryInterface, 0);
++    VerifyOrReturnValue(ChipLinuxAppInit(argc, argv, &sAppOptions) == 0, -1);
++#else
+     VerifyOrReturnValue(ChipLinuxAppInit(argc, argv) == 0, -1);
++#endif
+     ApplicationEarlyInit();
+     ChipLinuxAppMainLoop();
+     return 0;
+diff --git a/examples/network-manager-app/network-manager-common/network-manager-app.matter b/examples/network-manager-app/network-manager-common/network-manager-app.matter
+index f3c67b75e6..e8f4419707 100644
+--- a/examples/network-manager-app/network-manager-common/network-manager-app.matter
++++ b/examples/network-manager-app/network-manager-common/network-manager-app.matter
+@@ -1212,6 +1212,47 @@ cluster ThreadNetworkDiagnostics = 53 {
+   command access(invoke: manage) ResetCounts(): DefaultSuccess = 0;
+ }
+ 
++/** The Ethernet Network Diagnostics Cluster provides a means to acquire standardized diagnostics metrics that MAY be used by a Node to assist a user or Administrative Node in diagnosing potential problems. */
++cluster EthernetNetworkDiagnostics = 55 {
++  revision 1;
++
++  enum PHYRateEnum : enum8 {
++    kRate10M = 0;
++    kRate100M = 1;
++    kRate1G = 2;
++    kRate25G = 3 [spec_name = "Rate2_5G"];
++    kRate5G = 4;
++    kRate10G = 5;
++    kRate40G = 6;
++    kRate100G = 7;
++    kRate200G = 8;
++    kRate400G = 9;
++  }
++
++  bitmap Feature : bitmap32 {
++    kPacketCounts = 0x1;
++    kErrorCounts = 0x2;
++  }
++
++  readonly attribute optional nullable PHYRateEnum PHYRate = 0;
++  readonly attribute optional nullable boolean fullDuplex = 1;
++  readonly attribute optional int64u packetRxCount = 2;
++  readonly attribute optional int64u packetTxCount = 3;
++  readonly attribute optional int64u txErrCount = 4;
++  readonly attribute optional int64u collisionCount = 5;
++  readonly attribute optional int64u overrunCount = 6;
++  readonly attribute optional nullable boolean carrierDetect = 7;
++  readonly attribute optional int64u timeSinceReset = 8;
++  readonly attribute command_id generatedCommandList[] = 65528;
++  readonly attribute command_id acceptedCommandList[] = 65529;
++  readonly attribute attrib_id attributeList[] = 65531;
++  readonly attribute bitmap32 featureMap = 65532;
++  readonly attribute int16u clusterRevision = 65533;
++
++  /** This command is used to reset the count attributes. */
++  command access(invoke: manage) ResetCounts(): DefaultSuccess = 0;
++}
++
+ /** This cluster is used to trigger a Node to allow a new Administrator to commission it. */
+ cluster AdministratorCommissioning = 60 {
+   revision 1;
+@@ -1803,6 +1844,22 @@ endpoint 0 {
+     handle command TimeSnapshot;
+   }
+ 
++  server cluster EthernetNetworkDiagnostics {
++    callback attribute PHYRate;
++    callback attribute fullDuplex;
++    callback attribute packetRxCount;
++    callback attribute packetTxCount;
++    callback attribute txErrCount;
++    callback attribute collisionCount;
++    callback attribute overrunCount;
++    callback attribute carrierDetect;
++    callback attribute timeSinceReset;
++    ram      attribute featureMap default = 3;
++    callback attribute clusterRevision;
++
++    handle command ResetCounts;
++  }
++
+   server cluster AdministratorCommissioning {
+     callback attribute windowStatus;
+     callback attribute adminFabricIndex;
+diff --git a/examples/network-manager-app/network-manager-common/network-manager-app.zap b/examples/network-manager-app/network-manager-common/network-manager-app.zap
+index 54b516b22a..63083f7ef6 100644
+--- a/examples/network-manager-app/network-manager-common/network-manager-app.zap
++++ b/examples/network-manager-app/network-manager-common/network-manager-app.zap
+@@ -1582,6 +1582,202 @@
+             }
+           ]
+         },
++        {
++          "name": "Ethernet Network Diagnostics",
++          "code": 55,
++          "mfgCode": null,
++          "define": "ETHERNET_NETWORK_DIAGNOSTICS_CLUSTER",
++          "side": "server",
++          "enabled": 1,
++          "commands": [
++            {
++              "name": "ResetCounts",
++              "code": 0,
++              "mfgCode": null,
++              "source": "client",
++              "isIncoming": 1,
++              "isEnabled": 1
++            }
++          ],
++          "attributes": [
++            {
++              "name": "PHYRate",
++              "code": 0,
++              "mfgCode": null,
++              "side": "server",
++              "type": "PHYRateEnum",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 1,
++              "maxInterval": 65534,
++              "reportableChange": 0
++            },
++            {
++              "name": "FullDuplex",
++              "code": 1,
++              "mfgCode": null,
++              "side": "server",
++              "type": "boolean",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 1,
++              "maxInterval": 65534,
++              "reportableChange": 0
++            },
++            {
++              "name": "PacketRxCount",
++              "code": 2,
++              "mfgCode": null,
++              "side": "server",
++              "type": "int64u",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 0,
++              "maxInterval": 65344,
++              "reportableChange": 0
++            },
++            {
++              "name": "PacketTxCount",
++              "code": 3,
++              "mfgCode": null,
++              "side": "server",
++              "type": "int64u",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 0,
++              "maxInterval": 65344,
++              "reportableChange": 0
++            },
++            {
++              "name": "TxErrCount",
++              "code": 4,
++              "mfgCode": null,
++              "side": "server",
++              "type": "int64u",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 0,
++              "maxInterval": 65344,
++              "reportableChange": 0
++            },
++            {
++              "name": "CollisionCount",
++              "code": 5,
++              "mfgCode": null,
++              "side": "server",
++              "type": "int64u",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 0,
++              "maxInterval": 65344,
++              "reportableChange": 0
++            },
++            {
++              "name": "OverrunCount",
++              "code": 6,
++              "mfgCode": null,
++              "side": "server",
++              "type": "int64u",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 0,
++              "maxInterval": 65344,
++              "reportableChange": 0
++            },
++            {
++              "name": "CarrierDetect",
++              "code": 7,
++              "mfgCode": null,
++              "side": "server",
++              "type": "boolean",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 1,
++              "maxInterval": 65534,
++              "reportableChange": 0
++            },
++            {
++              "name": "TimeSinceReset",
++              "code": 8,
++              "mfgCode": null,
++              "side": "server",
++              "type": "int64u",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 1,
++              "maxInterval": 65534,
++              "reportableChange": 0
++            },
++            {
++              "name": "FeatureMap",
++              "code": 65532,
++              "mfgCode": null,
++              "side": "server",
++              "type": "bitmap32",
++              "included": 1,
++              "storageOption": "RAM",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": "3",
++              "reportable": 1,
++              "minInterval": 1,
++              "maxInterval": 65534,
++              "reportableChange": 0
++            },
++            {
++              "name": "ClusterRevision",
++              "code": 65533,
++              "mfgCode": null,
++              "side": "server",
++              "type": "int16u",
++              "included": 1,
++              "storageOption": "External",
++              "singleton": 0,
++              "bounded": 0,
++              "defaultValue": null,
++              "reportable": 1,
++              "minInterval": 0,
++              "maxInterval": 65344,
++              "reportableChange": 0
++            }
++          ]
++        },
+         {
+           "name": "Administrator Commissioning",
+           "code": 60,
+@@ -3792,4 +3988,4 @@
+       "parentEndpointIdentifier": null
+     }
+   ]
+-}
+\ No newline at end of file
++}
+-- 
+2.55.0
+

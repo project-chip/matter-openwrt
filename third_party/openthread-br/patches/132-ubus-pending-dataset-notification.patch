@@ -1,0 +1,165 @@
+From 2c7325fb55042af4df1aaf1e7b89482bf0904ea5 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 07:18:46 +0200
+Subject: [PATCH] [ubus] notify on pending dataset changes
+
+A scheduled migration is not observable: a subscriber sees the new active
+dataset only once the delay timer has expired and the switch has happened,
+with nothing to say a migration is in flight.
+
+Mirror the active dataset path in ThreadHelper for OT_CHANGED_PENDING_DATASET
+and forward it as a pending_dataset_changed ubus notification, so the Matter
+delegate can report PendingDatasetTimestamp without polling.
+
+otDatasetGetPendingTlvs() returns NOT_FOUND once a migration completes and
+the pending dataset has been consumed, which is not an error here but the
+signal that the switch has happened, so it is reported as an empty dataset.
+
+Assisted-By: Claude Opus 5
+---
+ src/host/thread_helper.cpp  | 37 +++++++++++++++++++++++++++++++++++++
+ src/host/thread_helper.hpp  |  9 +++++++++
+ src/openwrt/ubus/otubus.cpp | 11 +++++++++++
+ src/openwrt/ubus/otubus.hpp |  1 +
+ 4 files changed, 58 insertions(+)
+
+diff --git a/src/host/thread_helper.cpp b/src/host/thread_helper.cpp
+index bc52dbeb..7c61ed39 100644
+--- a/src/host/thread_helper.cpp
++++ b/src/host/thread_helper.cpp
+@@ -149,6 +149,11 @@ void ThreadHelper::StateChangedCallback(otChangedFlags aFlags)
+         ActiveDatasetChangedCallback();
+     }
+ 
++    if (aFlags & OT_CHANGED_PENDING_DATASET)
++    {
++        PendingDatasetChangedCallback();
++    }
++
+ exit:
+     return;
+ }
+@@ -183,6 +188,33 @@ exit:
+     }
+ }
+ 
++void ThreadHelper::PendingDatasetChangedCallback(void)
++{
++    otError                  error;
++    otOperationalDatasetTlvs datasetTlvs;
++
++    // Unlike the active dataset, this is empty once a scheduled migration has
++    // completed and the pending dataset has been applied.
++    error = otDatasetGetPendingTlvs(mInstance, &datasetTlvs);
++    if (error == OT_ERROR_NOT_FOUND)
++    {
++        datasetTlvs.mLength = 0;
++        error               = OT_ERROR_NONE;
++    }
++    SuccessOrExit(error);
++
++    for (const auto &handler : mPendingDatasetChangeHandlers)
++    {
++        handler(datasetTlvs);
++    }
++
++exit:
++    if (error != OT_ERROR_NONE)
++    {
++        otbrLogWarning("Error handling pending dataset change: %s", otThreadErrorToString(error));
++    }
++}
++
+ void ThreadHelper::AddDeviceRoleHandler(DeviceRoleHandler aHandler)
+ {
+     mDeviceRoleHandlers.emplace_back(aHandler);
+@@ -766,6 +798,11 @@ void ThreadHelper::AddActiveDatasetChangeHandler(DatasetChangeHandler aHandler)
+     mActiveDatasetChangeHandlers.push_back(std::move(aHandler));
+ }
+ 
++void ThreadHelper::AddPendingDatasetChangeHandler(DatasetChangeHandler aHandler)
++{
++    mPendingDatasetChangeHandlers.push_back(std::move(aHandler));
++}
++
+ void ThreadHelper::DetachGracefully(ResultHandler aHandler)
+ {
+     otError error = OT_ERROR_NONE;
+diff --git a/src/host/thread_helper.hpp b/src/host/thread_helper.hpp
+index 3c6c04e4..fbe8fe8d 100644
+--- a/src/host/thread_helper.hpp
++++ b/src/host/thread_helper.hpp
+@@ -105,6 +105,13 @@ public:
+      */
+     void AddActiveDatasetChangeHandler(DatasetChangeHandler aHandler);
+ 
++    /**
++     * This method adds a callback for pending dataset change.
++     *
++     * @param[in]  aHandler   The pending dataset change handler.
++     */
++    void AddPendingDatasetChangeHandler(DatasetChangeHandler aHandler);
++
+     /**
+      * This method permits unsecure join on port.
+      *
+@@ -273,6 +280,7 @@ private:
+     uint8_t RandomChannelFromChannelMask(uint32_t aChannelMask);
+ 
+     void    ActiveDatasetChangedCallback(void);
++    void    PendingDatasetChangedCallback(void);
+     bool    AreDatasetTlvsEqualToLocalDatasetTlvs(const otOperationalDatasetTlvs &aDatasetTlvs) const;
+     otError StartThreadStack(void);
+ 
+@@ -292,6 +300,7 @@ private:
+ 
+     std::vector<DeviceRoleHandler>    mDeviceRoleHandlers;
+     std::vector<DatasetChangeHandler> mActiveDatasetChangeHandlers;
++    std::vector<DatasetChangeHandler> mPendingDatasetChangeHandlers;
+ 
+     std::map<uint16_t, size_t> mUnsecurePortRefCounter;
+ 
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index b21b7177..f8d4101d 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -115,6 +115,8 @@ void UbusServer::Init()
+     mHost.GetThreadHelper()->AddDeviceRoleHandler(std::bind(&UbusServer::HandleDeviceRoleChanged, this, _1));
+     mHost.GetThreadHelper()->AddActiveDatasetChangeHandler(
+         std::bind(&UbusServer::HandleActiveDatasetChanged, this, _1));
++    mHost.GetThreadHelper()->AddPendingDatasetChangeHandler(
++        std::bind(&UbusServer::HandlePendingDatasetChanged, this, _1));
+ 
+ exit:
+     return;
+@@ -1273,6 +1275,15 @@ void UbusServer::HandleActiveDatasetChanged(const otOperationalDatasetTlvs &aDat
+     ubus_notify(&mContext, &Object(), "active_dataset_changed", mBuf.head, -1);
+ }
+ 
++void UbusServer::HandlePendingDatasetChanged(const otOperationalDatasetTlvs &aDataset)
++{
++    // An empty dataset is reported once a scheduled migration has completed,
++    // which is how a subscriber learns that the switch has happened.
++    blob_buf_init(&mBuf, 0);
++    blobmsg_add_hex_string(&mBuf, "PendingDataset", aDataset.mTlvs, aDataset.mLength);
++    ubus_notify(&mContext, &Object(), "pending_dataset_changed", mBuf.head, -1);
++}
++
+ const ubus_method UbusServer::sMethods[] = {
+     OTBR_UBUS_METHOD_NOARG("channel", &UbusServer::HandleChannel),
+     OTBR_UBUS_METHOD("setchannel", &UbusServer::HandleSetChannel, kSetChannelPolicy),
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index 550a6ed4..c587010d 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -150,6 +150,7 @@ private:
+     // ThreadHelper callbacks
+     void HandleDeviceRoleChanged(otDeviceRole role);
+     void HandleActiveDatasetChanged(const otOperationalDatasetTlvs &dataset);
++    void HandlePendingDatasetChanged(const otOperationalDatasetTlvs &dataset);
+ 
+     // === Internal helpers ===
+ 
+-- 
+2.55.0
+

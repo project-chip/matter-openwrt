@@ -30,13 +30,13 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=openthread-br
-PKG_RELEASE:=1
+PKG_RELEASE:=3
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git-with-metadata
 
-PKG_SOURCE_DATE:=2026-05-22
-PKG_SOURCE_VERSION:=9e56492ef19b6d43cc8be4a69ac7ae6376194f69
-PKG_MIRROR_HASH:=2ba2e9aeeeb8c5ee7411f18d3303340bf35817f6c1f12fa35bebeae5974ac45a
+PKG_SOURCE_DATE:=2026-08-02
+PKG_SOURCE_VERSION:=337711e7038d0b9c8fb46a1ce888ce7f9c4c0c35
+PKG_MIRROR_HASH:=f9a277274194ea260d81737f0651f74ef94651055834a734428bda08fa99d7d9
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE
@@ -69,18 +69,17 @@ endef
 
 define Package/openthread-br
   $(call Package/openthread-br/Default)
-  VARIANT:=default
-  DEPENDS+= +PACKAGE_openthread-br:libdnssd
+  DEPENDS+= +libdnssd
 endef
 
 define Package/openthread-br/description
 $(call Package/openthread-br/Default/description)
 
-This default variant of the package uses mDNSResponder for mDNS / DNS-SD.
+Uses mDNSResponder for mDNS / DNS-SD.
 endef
 
 define Package/openthread-br/config
-if PACKAGE_openthread-br || PACKAGE_openthread-br-avahi
+if PACKAGE_openthread-br
 config OPENTHREADBR_SHARED_MBEDTLS
 	bool "Use shared mbedTLS library for OpenThread"
 	default n
@@ -92,25 +91,10 @@ config OPENTHREADBR_SHARED_MBEDTLS
 endif
 endef
 
-define Package/openthread-br-avahi
-  $(call Package/openthread-br/Default)
-  VARIANT:=avahi
-  PROVIDES:=openthread-br
-  CONFLICTS:=openthread-br
-  DEPENDS+= +PACKAGE_openthread-br-avahi:libavahi-client
-endef
-
-define Package/openthread-br-avahi/description
-$(call Package/openthread-br/Default/description)
-
-This variant of the package uses Avahi for mDNS / DNS-SD.
-endef
-
-
 define Package/openthread-br-luci
   $(call Package/openthread-br/Default)
   TITLE+= (LuCI module)
-  DEPENDS:=+luci-lua-runtime @PACKAGE_openthread-br||PACKAGE_openthread-br-avahi
+  DEPENDS:=+luci-lua-runtime @PACKAGE_openthread-br
 endef
 
 define Package/openthread-br-luci/description
@@ -126,10 +110,15 @@ CMAKE_OPTIONS+= \
 	-DBUILD_TESTING=OFF \
 	-DOTBR_OPENWRT=ON \
 	-DOTBR_VENDOR_NAME=$(VERSION_MANUFACTURER) \
+	-DOTBR_MDNS=mDNSResponder \
 	-DOTBR_BORDER_AGENT=ON \
 	-DOTBR_BORDER_ROUTING=ON \
-	-DOTBR_SRP_ADVERTISING_PROXY=ON \
 	-DOTBR_NAT64=OFF \
+	-DOTBR_REST=OFF \
+	-DOTBR_SRP_SERVER_AUTO_ENABLE=ON \
+	-DOT_BORDER_ROUTER=ON \
+	-DOT_CHANNEL_MANAGER=ON \
+	-DOT_CHANNEL_MONITOR=ON \
 	-DOTBR_SETTINGS_FILE_USE_INTERFACE_NAME=ON \
 	-DOT_POSIX_SETTINGS_PATH=\"/etc/openthread\" \
 	-DOT_FIREWALL=OFF \
@@ -143,12 +132,6 @@ TARGET_CFLAGS+= \
 
 ifneq ($(CONFIG_OPENTHREADBR_SHARED_MBEDTLS),)
 CMAKE_OPTIONS+= -DOTBR_EXTERNAL_MBEDTLS="mbedtls;mbedcrypto;mbedx509"
-endif
-
-ifeq ($(BUILD_VARIANT),avahi)
-CMAKE_OPTIONS+= -DOTBR_MDNS=avahi
-else
-CMAKE_OPTIONS+= -DOTBR_MDNS=mDNSResponder
 endif
 
 define Package/openthread-br/install
@@ -167,9 +150,6 @@ define Package/openthread-br/conffiles
 /etc/openthread/
 endef
 
-Package/openthread-br-avahi/install=$(Package/openthread-br/install)
-Package/openthread-br-avahi/conffiles=$(Package/openthread-br/conffiles)
-
 define Package/openthread-br-luci/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller/admin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/openwrt/controller/thread.lua $(1)/usr/lib/lua/luci/controller/admin
@@ -182,5 +162,4 @@ define Package/openthread-br-luci/install
 endef
 
 $(eval $(call BuildPackage,openthread-br))
-$(eval $(call BuildPackage,openthread-br-avahi))
 $(eval $(call BuildPackage,openthread-br-luci))

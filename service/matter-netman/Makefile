@@ -15,7 +15,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=matter-netman
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_SOURCE_URL:=https://github.com/project-chip/connectedhomeip.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_SUBMODULES:=\
@@ -107,7 +107,10 @@ $(Package/matter-netman/default/description)
 This variant of the package uses the OpenSSL crypto library.
 endef
 
-# General options
+# General options. The last two deliberately reverse what the example's
+# args.gni asks for: access restrictions are backed only by the SDK's
+# demonstration provider, which lifts every restriction on request, and
+# tracing is of no use in a shipped build.
 CONFIGURE_OPTIONS:=\
 	--enable-ubus \
 	--enable-detail-logging \
@@ -140,12 +143,16 @@ TARGET_CFLAGS+=\
 # Device Information. Runtime information is configured by bootstrap.sh
 include $(INCLUDE_DIR)/version.mk
 OS_VERSION:=$(if $(filter-out SNAPSHOT,$(VERSION_NUMBER)),$(VERSION_NUMBER)-)$(VERSION_CODE)
+# The identity strings are gn arguments rather than -D in TARGET_CFLAGS: the
+# configure script splits CFLAGS on whitespace, so a define whose value has a
+# space in it does not survive. The serial number stays a define because its
+# gn argument emits nothing for the empty string, which is the value wanted.
+CONFIGURE_OPTIONS+=\
+	--device-config-device-software-version-string="$(PKG_VERSION)@$(OS_VERSION)" \
+	--device-config-device-hardware-version-string="-" \
+	--device-config-device-vendor-name="$(VERSION_DIST)"
 TARGET_CFLAGS+=\
 	-DCHIP_DEVICE_CONFIG_ENABLE_TEST_SETUP_PARAMS=0 \
-	-DCHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION_STRING=\"$(PKG_VERSION)@$(OS_VERSION)\" \
-	-DCHIP_DEVICE_CONFIG_DEFAULT_DEVICE_HARDWARE_VERSION_STRING=\"-\" \
-	-DCHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME=\"$(VERSION_DIST)\" \
-	-DCHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME=\"\" \
 	-DCHIP_DEVICE_CONFIG_TEST_SERIAL_NUMBER=\"\"
 
 # https://github.com/openwrt/openwrt/issues/13016
@@ -169,11 +176,13 @@ define Build/Compile
 endef
 
 define Package/matter-netman/default/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/usr/share/matter $(1)/etc/init.d $(1)/usr/share/acl.d $(1)/etc/hotplug.d/iface $(1)/etc/config
 	$(INSTALL_BIN) $(OUT_DIR)/matter-network-manager-app $(1)/usr/sbin
 	$(INSTALL_DATA) ./files/bootstrap.sh $(1)/usr/share/matter/
 	$(INSTALL_DATA) ./files/matter_acl.json $(1)/usr/share/acl.d
 	$(INSTALL_BIN) ./files/matter.init $(1)/etc/init.d/matter
+	$(INSTALL_CONF) ./files/matter.config $(1)/etc/config/matter
+	$(INSTALL_BIN) ./files/matter.iface-hotplug $(1)/etc/hotplug.d/iface/99-matter
 endef
 
 Package/matter-netman-mbedtls/install=$(Package/matter-netman/default/install)
@@ -181,6 +190,7 @@ Package/matter-netman-openssl/install=$(Package/matter-netman/default/install)
 
 define Package/matter-netman/default/conffiles
 $(CONF_DIR)/
+/etc/config/matter
 endef
 
 Package/matter-netman-mbedtls/conffiles=$(Package/matter-netman/default/conffiles)

@@ -1,0 +1,80 @@
+From efb39c493656b53297c2f2676e78aa186248c67a Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Tue, 28 Jul 2026 00:12:17 +0200
+Subject: [PATCH] [ubus] respond to provision once the join is under way
+
+provision deferred its reply to Join()'s receiver, which only fires when
+the device attaches. Even a lone border router promoting itself to
+leader takes over ten seconds to get there, so every caller that
+matters timed out first: the Matter TBRM delegate has to answer
+SetActiveDatasetRequest within the controller's interaction timeout,
+and a plain ubus call gives up too.
+
+Commit the dataset before starting the join, so a malformed dataset
+still fails the call synchronously, then respond as soon as the join is
+under way. The attach outcome is reported through the
+device_role_changed notification, which interested callers already
+subscribe to.
+
+Assisted-By: Claude Opus 5
+---
+ src/openwrt/ubus/otubus.cpp | 37 +++++++++++++++++++++++++++++++++----
+ 1 file changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index e64c8207..86b58aec 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -1214,16 +1214,45 @@ int UbusServer::HandleProvision(ubus_request_data *aRequest, blob_attr *(&aArgs)
+         // refuse to run. SetThreadEnabled() is what moves that state, and it is
+         // idempotent.
+         mHost.SetThreadEnabled(true, [this, dataset, respond](otError aError, const std::string &aInfo) {
++            otError error = aError;
++
+             // NCP does not implement SetThreadEnabled and does not need it: its
+             // Join() has no enabled-state precondition.
+-            if (aError != OT_ERROR_NONE && aError != OT_ERROR_NOT_IMPLEMENTED)
++            if (error == OT_ERROR_NOT_IMPLEMENTED)
+             {
+-                respond(aError, aInfo);
++                error = OT_ERROR_NONE;
+             }
+-            else
++
++            if (error == OT_ERROR_NONE)
++            {
++                // Commit the dataset here so a malformed one still fails the
++                // call; Join() commits the same TLVs again.
++                error = otDatasetSetActiveTlvs(mHost.GetInstance(), &dataset);
++            }
++
++            if (error != OT_ERROR_NONE)
+             {
+-                mHost.Join(dataset, respond);
++                respond(error, aInfo);
++                return;
+             }
++
++            // Respond once the join is under way rather than when the device
++            // attaches: attaching takes long enough that callers time out
++            // waiting, and the Matter TBRM delegate has to answer its
++            // controller well before then. The attach outcome is reported
++            // through the device_role_changed notification.
++            mHost.Join(dataset, [](otError aJoinError, const std::string &aJoinInfo) {
++                if (aJoinError == OT_ERROR_NONE)
++                {
++                    otbrLogInfo("provision: join succeeded");
++                }
++                else
++                {
++                    otbrLogWarning("provision: join failed: %s (%s)", otThreadErrorToString(aJoinError),
++                                   aJoinInfo.c_str());
++                }
++            });
++            respond(OT_ERROR_NONE, "");
+         });
+     }
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,48 @@
+From 7eae04af52fe9bed536e046b2522847d30cf3b67 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sun, 2 Aug 2026 10:41:12 +0200
+Subject: [PATCH] [network-manager] do not re-register the ubus watch while
+ shutting down
+
+ThreadBorderRouterManagementCluster uses the delegate's Init() for two opposite
+purposes: Startup() passes the attribute-change callback, and Shutdown() passes
+nullptr to detach it. OpenThreadUbusBorderRouterDelegate treated both as a fresh
+initialisation and registered its ubus watch either way.
+
+That second call arrives on the way down. ChipLinuxAppMainLoop runs
+ApplicationShutdown() before Server::Shutdown(), so by the time the cluster
+detaches its callback the application has already stopped the UbusManager, and
+UbusManager::Register() asserts that it is initialised. The daemon therefore
+aborted on every clean shutdown:
+
+  SPT: VerifyOrDie failure at UbusManager.cpp:163: mInitialized
+
+Return early when there is no callback: detaching is not initialisation, and it
+has nothing to register.
+
+Assisted-By: Claude Opus 5
+---
+ .../network-manager-app/linux/ThreadBROpenThreadUbus.cpp   | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+index 97ac76ca7b..6c11534b87 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+@@ -41,6 +41,13 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::Init(AttributeChangeCallback * at
+ {
+     mAttributeChangeCallback = attributeChangeCallback;
+ 
++    // The cluster uses Init() for two opposite things: Startup() passes the
++    // callback, and Shutdown() passes nullptr to detach it. The second runs on
++    // the way down, by which point ApplicationShutdown() has already stopped
++    // the ubus manager -- and registering a watch on a stopped manager is a
++    // VerifyOrDie. Detaching is not a fresh initialisation, so stop here.
++    VerifyOrReturnValue(attributeChangeCallback != nullptr, CHIP_NO_ERROR);
++
+     mOtbr.SetResolvedCallback([](UbusWatch & watch, void * appState) {
+         auto * self = static_cast<decltype(this)>(appState);
+         ubus_invoke(&self->mUbusManager.Context(), watch.ObjectID(), "status", nullptr,
+-- 
+2.55.0
+

@@ -1,0 +1,43 @@
+From 1e29120b2b753c26e87683dc6d5c71d786700099 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 07:34:19 +0200
+Subject: [PATCH] [network-manager] implement RevertActiveDataset in the fake
+ delegate
+
+The fake border router returned NOT_IMPLEMENTED, so fail-safe rollback
+could not be exercised without real hardware.
+
+SetActiveDataset is only accepted when no dataset is configured, so
+reverting means returning to the unconfigured state rather than restoring
+a previous dataset. Clear it and report the timestamp change.
+
+Assisted-By: Claude Opus 5
+---
+ examples/network-manager-app/linux/ThreadBRFake.h | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/examples/network-manager-app/linux/ThreadBRFake.h b/examples/network-manager-app/linux/ThreadBRFake.h
+index 86a92c7c54..4ac56e9455 100644
+--- a/examples/network-manager-app/linux/ThreadBRFake.h
++++ b/examples/network-manager-app/linux/ThreadBRFake.h
+@@ -92,7 +92,16 @@ class FakeBorderRouterDelegate final : public app::Clusters::ThreadBorderRouterM
+     }
+ 
+     CHIP_ERROR CommitActiveDataset() override { return CHIP_NO_ERROR; }
+-    CHIP_ERROR RevertActiveDataset() override { return CHIP_ERROR_NOT_IMPLEMENTED; }
++
++    CHIP_ERROR RevertActiveDataset() override
++    {
++        // SetActiveDataset is only accepted when no dataset is configured, so
++        // reverting it means returning to the unconfigured state.
++        mActiveDataset.Clear();
++        mAttributeChangeCallback->ReportAttributeChanged(
++            app::Clusters::ThreadBorderRouterManagement::Attributes::ActiveDatasetTimestamp::Id);
++        return CHIP_NO_ERROR;
++    }
+ 
+     CHIP_ERROR SetPendingDataset(const Thread::OperationalDataset & pendingDataset) override
+     {
+-- 
+2.55.0
+

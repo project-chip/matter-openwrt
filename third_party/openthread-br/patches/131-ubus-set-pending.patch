@@ -1,0 +1,87 @@
+From 220ef4ce502b579f3a0a526782979f689ff6c77c Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 07:15:04 +0200
+Subject: [PATCH] [ubus] add a set_pending method for scheduling a migration
+
+provision forms a network but cannot change one that is already running:
+replacing the credentials or the channel of a live network has to go
+through the pending dataset, so every node switches together when the
+delay timer expires rather than being orphaned.
+
+Add set_pending, taking the same hex encoded dataset argument as
+provision, and forward it to ThreadHost::ScheduleMigration(), which sends
+MGMT_PENDING_SET. It is implemented for both RcpHost and NcpHost, the
+latter through NcpSpinel::DatasetMgmtSetPending(), so this works in either
+mode. It reports its result asynchronously and rejects a detached device,
+hence the deferred response.
+
+This is the ubus counterpart of the Thread Border Router Management
+cluster's SetPendingDatasetRequest, which the Matter delegate currently
+answers with NOT_IMPLEMENTED.
+
+Assisted-By: Claude Opus 5
+---
+ src/openwrt/ubus/otubus.cpp | 27 +++++++++++++++++++++++++++
+ src/openwrt/ubus/otubus.hpp |  1 +
+ 2 files changed, 28 insertions(+)
+
+diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
+index 6e269592..b21b7177 100644
+--- a/src/openwrt/ubus/otubus.cpp
++++ b/src/openwrt/ubus/otubus.cpp
+@@ -1232,6 +1232,32 @@ exit:
+     return 0;
+ }
+ 
++static constexpr blobmsg_policy kSetPendingPolicy[] = {
++    [0] = {.name = "dataset", .type = BLOBMSG_TYPE_STRING},
++};
++
++int UbusServer::HandleSetPending(ubus_request_data *aRequest, blob_attr *(&aArgs)[1])
++{
++    otError                  error = OT_ERROR_INVALID_ARGS;
++    int                      datasetLength;
++    otOperationalDatasetTlvs dataset;
++
++    VerifyOrExit(aArgs[0] != nullptr);
++    VerifyOrExit((datasetLength = blobmsg_get_hex_string(aArgs[0], dataset.mTlvs, sizeof(dataset.mTlvs))) > 0);
++    dataset.mLength = datasetLength;
++
++    // ScheduleMigration() sends MGMT_PENDING_SET, so the network switches to the
++    // new dataset when its delay timer expires instead of immediately. It
++    // requires an attached device and reports its result asynchronously.
++    mHost.ScheduleMigration(dataset, DeferResponse(aRequest));
++
++    return 0;
++
++exit:
++    SendInvokeResponse(aRequest, &mBuf, error);
++    return 0;
++}
++
+ void UbusServer::HandleDeviceRoleChanged(otDeviceRole aRole)
+ {
+     blob_buf_init(&mBuf, 0);
+@@ -1293,6 +1319,7 @@ const ubus_method UbusServer::sMethods[] = {
+     OTBR_UBUS_METHOD_NOARG("version", &UbusServer::HandleVersion),
+     OTBR_UBUS_METHOD_NOARG("status", &UbusServer::HandleStatus),
+     OTBR_UBUS_METHOD("provision", &UbusServer::HandleProvision, kProvisionPolicy),
++    OTBR_UBUS_METHOD("set_pending", &UbusServer::HandleSetPending, kSetPendingPolicy),
+ };
+ 
+ ubus_object_type UbusServer::sObjectType = UBUS_OBJECT_TYPE("otbr", sMethods);
+diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
+index 62476827..550a6ed4 100644
+--- a/src/openwrt/ubus/otubus.hpp
++++ b/src/openwrt/ubus/otubus.hpp
+@@ -121,6 +121,7 @@ private:
+     int HandleVersion(ubus_request_data *aRequest);
+     int HandleStatus(ubus_request_data *aRequest);
+     int HandleProvision(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
++    int HandleSetPending(ubus_request_data *aRequest, blob_attr *(&aArgs)[1]);
+ 
+     // === Callbacks ===
+ 
+-- 
+2.55.0
+

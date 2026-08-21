@@ -1,0 +1,43 @@
+From f994ed5f66536413d4b0c7708024509b5ca8e813 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Mon, 27 Jul 2026 22:16:05 +0200
+Subject: [PATCH] [host] value-initialise the dataset in ScheduleMigration
+
+otDatasetSendMgmtPendingSet() takes an otOperationalDataset whose
+mComponents flags say which fields to serialise. ScheduleMigration()
+passes one straight off the stack, so whatever the flags happen to
+contain is put on the wire as extra TLVs, and the leader answers
+MGMT_PENDING_SET.req with Reject. Observed on a Turris Omnia (armv7,
+musl), where the stack bytes are reliably nonzero: every migration
+attempt failed with OT_ERROR_REJECTED.
+
+Value-initialise the dataset so only the caller's TLVs are sent.
+
+Assisted-By: Claude Opus 5
+---
+ src/host/rcp_host.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/host/rcp_host.cpp b/src/host/rcp_host.cpp
+index a54bcd6f..73f9aa20 100644
+--- a/src/host/rcp_host.cpp
++++ b/src/host/rcp_host.cpp
+@@ -625,9 +625,12 @@ exit:
+ void RcpHost::ScheduleMigration(const otOperationalDatasetTlvs &aPendingOpDatasetTlvs,
+                                 const AsyncResultReceiver       aReceiver)
+ {
+-    otError              error = OT_ERROR_NONE;
+-    std::string          errorMsg;
+-    otOperationalDataset emptyDataset;
++    otError     error = OT_ERROR_NONE;
++    std::string errorMsg;
++    // Value-initialise: otDatasetSendMgmtPendingSet() serialises whichever
++    // fields mComponents says are present, so leaving this indeterminate puts
++    // garbage TLVs on the wire and the leader answers Reject.
++    otOperationalDataset emptyDataset{};
+ 
+     VerifyOrExit(mInstance != nullptr, error = OT_ERROR_INVALID_STATE, errorMsg = "OT is not initialized");
+ 
+-- 
+2.55.0
+

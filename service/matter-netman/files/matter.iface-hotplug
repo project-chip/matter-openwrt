@@ -1,0 +1,23 @@
+#!/bin/sh
+# The daemon binds its mDNS sockets to the interfaces that existed when the
+# Matter server started, so an interface that appears or bounces afterwards
+# leaves the node undiscoverable and unreachable for CASE. netifd runs these
+# hooks on every interface state change; ask the daemon to re-bind.
+#
+# Re-binding is cheap and keeps the CASE sessions, so this does not try to work
+# out which device matters -- with one exception. The Thread interface is never
+# advertised on, so its comings and goings cannot change what is bound, and on a
+# border router it changes often enough to be worth not reacting to.
+#
+# Temporary. Once the SDK notices interface changes by itself this file goes.
+
+[ "$ACTION" = "ifup" ] || exit 0
+
+case "$DEVICE" in
+wpan*) exit 0 ;;
+esac
+
+/etc/init.d/matter running || exit 0
+
+logger -t matter "$DEVICE came up, asking the Matter daemon to rebind mDNS"
+/etc/init.d/matter rebind

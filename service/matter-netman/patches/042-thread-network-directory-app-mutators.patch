@@ -1,0 +1,314 @@
+From 3aedfb42d8a2ef15a640055708b63088c72c4e2a Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sat, 1 Aug 2026 10:30:12 +0200
+Subject: [PATCH] [thread-network-directory] let an application record and
+ retract networks
+
+The cluster gives an application access to its storage and nothing else, so a
+border router recording the network it is on writes behind the cluster's back:
+subscribers to ThreadNetworks are not told, and the cluster's data version does
+not move.
+
+Add AddOrUpdateNetwork and ForgetNetwork alongside the existing Storage()
+accessor. They go through the cluster, so both happen as they do for the
+cluster's own commands.
+
+ForgetNetwork also keeps the invariant that PreferredExtendedPanID names a
+network in the list. A preference pointing at the network being retracted
+follows it to a successor when the caller supplies one, and is cleared when
+there is none.
+
+Assisted-By: Claude Opus 5
+---
+ .../CodegenIntegration.h                      | 31 +++++-
+ .../ThreadNetworkDirectoryCluster.cpp         | 94 +++++++++++++++++++
+ .../ThreadNetworkDirectoryCluster.h           | 31 ++++++
+ .../TestThreadNetworkDirectoryCluster.cpp     | 71 ++++++++++++++
+ 4 files changed, 223 insertions(+), 4 deletions(-)
+
+diff --git a/src/app/clusters/thread-network-directory-server/CodegenIntegration.h b/src/app/clusters/thread-network-directory-server/CodegenIntegration.h
+index 020da46296..a5887aa191 100644
+--- a/src/app/clusters/thread-network-directory-server/CodegenIntegration.h
++++ b/src/app/clusters/thread-network-directory-server/CodegenIntegration.h
+@@ -38,18 +38,41 @@ class DefaultThreadNetworkDirectoryServer
+ public:
+     DefaultThreadNetworkDirectoryServer(EndpointId endpoint,
+                                         PersistentStorageDelegate & storage = Server::GetInstance().GetPersistentStorage()) :
+-        mStorage(storage),
+-        mCluster(endpoint, mStorage)
++        mStorage(storage), mCluster(endpoint, mStorage)
+     {}
+ 
+     ~DefaultThreadNetworkDirectoryServer();
+ 
+     CHIP_ERROR Init();
+ 
+-    // Grants the application access to the underlying storage, e.g. to seed
+-    // the directory with networks it knows about on its own.
++    // Grants the application access to the underlying storage, e.g. to read
++    // back what it recorded. Mutations go through the cluster below, so that
++    // subscribers see them.
+     ThreadNetworkDirectoryStorage & Storage() { return mStorage; }
+ 
++    // Records a network the application knows of its own accord, e.g. the
++    // border router's own, replacing any entry with the same Extended PAN ID.
++    CHIP_ERROR AddOrUpdateNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId & extendedPanId, ByteSpan dataset)
++    {
++        return mCluster.Cluster().AddOrUpdateNetwork(extendedPanId, dataset);
++    }
++
++    // Retracts one, clearing PreferredExtendedPanID if it named that network.
++    CHIP_ERROR ForgetNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId & extendedPanId)
++    {
++        return mCluster.Cluster().ForgetNetwork(extendedPanId);
++    }
++
++    CHIP_ERROR GetPreferredNetwork(std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> & extendedPanId)
++    {
++        return mCluster.Cluster().GetPreferredNetwork(extendedPanId);
++    }
++
++    CHIP_ERROR SetPreferredNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId * extendedPanId)
++    {
++        return mCluster.Cluster().SetPreferredNetwork(extendedPanId);
++    }
++
+ private:
+     DefaultThreadNetworkDirectoryStorage mStorage;
+     RegisteredServerCluster<ThreadNetworkDirectoryCluster> mCluster;
+diff --git a/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.cpp b/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.cpp
+index 234c325fb4..8364b04c97 100644
+--- a/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.cpp
++++ b/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.cpp
+@@ -278,6 +278,100 @@ exit:
+     return (status == IMStatus::Failure && err == CHIP_ERROR_NO_MEMORY) ? IMStatus::ResourceExhausted : status;
+ }
+ 
++ConcreteDataAttributePath ThreadNetworkDirectoryCluster::PreferredExtendedPanIdPath() const
++{
++    return ConcreteDataAttributePath(mPath.mEndpointId, ThreadNetworkDirectory::Id,
++                                     ThreadNetworkDirectory::Attributes::PreferredExtendedPanID::Id);
++}
++
++// "It SHALL contain at least the following sub-TLVs: Active Timestamp, Channel, Channel Mask,
++// Extended PAN ID, Network Key, Network Mesh-Local Prefix, Network Name, PAN ID, PKSc, and Security Policy."
++CHIP_ERROR ThreadNetworkDirectoryCluster::ValidateDatasetForDirectory(ByteSpan dataset, ByteSpan & outExtendedPanId)
++{
++    OperationalDatasetView view;
++    union
++    {
++        uint16_t channel;
++        uint8_t masterKey[kSizeMasterKey];
++        uint8_t meshLocalPrefix[kSizeMeshLocalPrefix];
++        char networkName[kSizeNetworkName + 1];
++        uint16_t panId;
++        uint8_t pksc[kSizePSKc];
++        uint32_t securityPolicy;
++        uint64_t activeTimestamp;
++    } unused;
++    ByteSpan unusedSpan;
++
++    ReturnErrorOnFailure(view.Init(dataset));
++    ReturnErrorOnFailure(view.GetExtendedPanIdAsByteSpan(outExtendedPanId));
++    ReturnErrorOnFailure(view.GetActiveTimestamp(unused.activeTimestamp));
++    ReturnErrorOnFailure(view.GetChannel(unused.channel));
++    ReturnErrorOnFailure(view.GetChannelMask(unusedSpan));
++    ReturnErrorOnFailure(view.GetMasterKey(unused.masterKey));
++    ReturnErrorOnFailure(view.GetMeshLocalPrefix(unused.meshLocalPrefix));
++    ReturnErrorOnFailure(view.GetNetworkName(unused.networkName));
++    ReturnErrorOnFailure(view.GetPanId(unused.panId));
++    ReturnErrorOnFailure(view.GetPSKc(unused.pksc));
++    ReturnErrorOnFailure(view.GetSecurityPolicy(unused.securityPolicy));
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR ThreadNetworkDirectoryCluster::AddOrUpdateNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId & extendedPanId,
++                                                             ByteSpan dataset)
++{
++    // An entry an application records has to satisfy the same constraints as
++    // one a client adds, or a controller reading ThreadNetworks gets something
++    // the cluster's own command would have rejected.
++    ByteSpan datasetExtendedPanId;
++    ReturnErrorOnFailure(ValidateDatasetForDirectory(dataset, datasetExtendedPanId));
++    VerifyOrReturnError(ExtendedPanId(datasetExtendedPanId) == extendedPanId, CHIP_ERROR_INVALID_ARGUMENT);
++
++    // The increasing Active Timestamp rule that AddNetwork enforces is not
++    // applied here. It exists to stop one client regressing another's entry;
++    // an application recording what its own border router reports is the
++    // authority on that network, and a re-formed network legitimately starts
++    // over.
++    ReturnErrorOnFailure(mStorage.AddOrUpdateNetwork(extendedPanId, dataset));
++    NotifyAttributeChanged(ThreadNetworks::Id);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR ThreadNetworkDirectoryCluster::ForgetNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId & extendedPanId)
++{
++    // "If not null, the value ... SHALL match the ExtendedPanID of a network in
++    // the ThreadNetworks attribute". Clear the preference before the removal
++    // rather than after: if the removal then fails, a null preference is still
++    // a legal state, whereas one naming a network that is gone is not.
++    std::optional<ExtendedPanId> preferred;
++    ReturnErrorOnFailure(GetPreferredNetwork(preferred));
++    if (preferred.has_value() && preferred.value() == extendedPanId)
++    {
++        ReturnErrorOnFailure(SetPreferredNetwork(nullptr));
++    }
++
++    ReturnErrorOnFailure(mStorage.RemoveNetwork(extendedPanId));
++    NotifyAttributeChanged(ThreadNetworks::Id);
++    return CHIP_NO_ERROR;
++}
++
++CHIP_ERROR
++ThreadNetworkDirectoryCluster::GetPreferredNetwork(std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> & extendedPanId)
++{
++    return ReadExtendedPanId(PreferredExtendedPanIdPath(), extendedPanId);
++}
++
++CHIP_ERROR ThreadNetworkDirectoryCluster::SetPreferredNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId * extendedPanId)
++{
++    // Same constraint the attribute write enforces: a preference has to name a
++    // network that is actually in the list.
++    VerifyOrReturnError(extendedPanId == nullptr || mStorage.ContainsNetwork(*extendedPanId), CHIP_ERROR_INVALID_ARGUMENT);
++
++    const ByteSpan value = (extendedPanId != nullptr) ? ByteSpan(extendedPanId->bytes) : ByteSpan();
++    ReturnErrorOnFailure(GetSafeAttributePersistenceProvider()->SafeWriteValue(PreferredExtendedPanIdPath(), value));
++    NotifyAttributeChanged(ThreadNetworkDirectory::Attributes::PreferredExtendedPanID::Id);
++    return CHIP_NO_ERROR;
++}
++
+ DataModel::ActionReturnStatus ThreadNetworkDirectoryCluster::HandleRemoveNetworkRequest(
+     const ThreadNetworkDirectory::Commands::RemoveNetwork::DecodableType & req)
+ {
+diff --git a/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.h b/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.h
+index b13a8d9370..645f64842a 100644
+--- a/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.h
++++ b/src/app/clusters/thread-network-directory-server/ThreadNetworkDirectoryCluster.h
+@@ -47,10 +47,41 @@ public:
+                                 ReadOnlyBufferBuilder<DataModel::AcceptedCommandEntry> & builder) override;
+     CHIP_ERROR GeneratedCommands(const ConcreteClusterPath & path, ReadOnlyBufferBuilder<CommandId> & builder) override;
+ 
++    // Application-facing accessors. An application that knows of a network by
++    // other means — a border router knows its own — can record and retract it
++    // here. Going through the cluster rather than around it to the storage is
++    // what makes the change visible: subscribers to ThreadNetworks are told,
++    // and the cluster's data version moves.
++    //
++    // Each of these leaves the cluster's invariants intact on its own, so an
++    // application can call them in any order without arranging a moment where
++    // PreferredExtendedPanID names a network that is not in the list.
++
++    // Records a network, replacing any entry with the same Extended PAN ID.
++    // The dataset must carry the sub-TLVs the specification requires of an
++    // entry, the same set AddNetwork checks.
++    CHIP_ERROR AddOrUpdateNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId & extendedPanId, ByteSpan dataset);
++
++    // Retracts a network. If PreferredExtendedPanID names it, the preference
++    // is cleared first: null means no preference, which is always legal, and
++    // an application that wants to move the preference elsewhere calls
++    // SetPreferredNetwork afterwards.
++    CHIP_ERROR ForgetNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId & extendedPanId);
++
++    // Reads PreferredExtendedPanID; empty when null.
++    CHIP_ERROR GetPreferredNetwork(std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> & extendedPanId);
++
++    // Points PreferredExtendedPanID at a network, which must already be in the
++    // list, or clears it when given nothing.
++    CHIP_ERROR SetPreferredNetwork(const ThreadNetworkDirectoryStorage::ExtendedPanId * extendedPanId);
++
+ private:
+     using ExtendedPanId = ThreadNetworkDirectoryStorage::ExtendedPanId;
+ 
+     // Attribute handling helpers
++    ConcreteDataAttributePath PreferredExtendedPanIdPath() const;
++    // The sub-TLVs the specification requires of a directory entry.
++    static CHIP_ERROR ValidateDatasetForDirectory(ByteSpan dataset, ByteSpan & outExtendedPanId);
+     CHIP_ERROR ReadExtendedPanId(const ConcreteDataAttributePath & aPath, std::optional<ExtendedPanId> & outExPanId);
+     CHIP_ERROR ReadPreferredExtendedPanId(const ConcreteDataAttributePath & aPath, AttributeValueEncoder & aEncoder);
+     CHIP_ERROR ReadThreadNetworks(const ConcreteDataAttributePath & aPath, AttributeValueEncoder & aEncoder);
+diff --git a/src/app/clusters/thread-network-directory-server/tests/TestThreadNetworkDirectoryCluster.cpp b/src/app/clusters/thread-network-directory-server/tests/TestThreadNetworkDirectoryCluster.cpp
+index e228ea4093..69096dbf7f 100644
+--- a/src/app/clusters/thread-network-directory-server/tests/TestThreadNetworkDirectoryCluster.cpp
++++ b/src/app/clusters/thread-network-directory-server/tests/TestThreadNetworkDirectoryCluster.cpp
+@@ -237,6 +237,77 @@ TEST_F(TestThreadNetworkDirectoryCluster, TestPreferredExtendedPanId)
+     cluster.Shutdown(ClusterShutdownType::kClusterShutdown);
+ }
+ 
++// ---------------------------------------------------------------------------
++// TestApplicationMutators: the accessors an application uses to record and
++// retract networks it knows about by other means. Each one has to leave the
++// cluster's invariants intact on its own.
++// ---------------------------------------------------------------------------
++TEST_F(TestThreadNetworkDirectoryCluster, TestApplicationMutators)
++{
++    app::Testing::FakeThreadNetworkDirectoryStorage storage;
++    ThreadNetworkDirectoryCluster cluster(kTestEndpointId, storage);
++    chip::Testing::TestServerClusterContext context;
++    ASSERT_EQ(cluster.Startup(context.Get()), CHIP_NO_ERROR);
++    ScopedSafeAttributePersistence scopedPersistence(context);
++
++    // A dataset missing the required sub-TLVs is refused, so an application
++    // cannot put an entry in the list that AddNetwork would have rejected.
++    constexpr uint8_t kTruncated[] = { 0x0e, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00 };
++    EXPECT_NE(cluster.AddOrUpdateNetwork(MakeExPanId1(), ByteSpan(kTruncated)), CHIP_NO_ERROR);
++
++    // An Extended PAN ID that disagrees with the dataset is refused too.
++    EXPECT_EQ(cluster.AddOrUpdateNetwork(MakeExPanId2(), ByteSpan(kDataset1)), CHIP_ERROR_INVALID_ARGUMENT);
++
++    // A well-formed one is recorded.
++    EXPECT_EQ(cluster.AddOrUpdateNetwork(MakeExPanId1(), ByteSpan(kDataset1)), CHIP_NO_ERROR);
++    EXPECT_TRUE(storage.ContainsNetwork(MakeExPanId1()));
++
++    // A preference must name a network that is in the list.
++    auto exPanId2 = MakeExPanId2();
++    EXPECT_EQ(cluster.SetPreferredNetwork(&exPanId2), CHIP_ERROR_INVALID_ARGUMENT);
++    auto exPanId1 = MakeExPanId1();
++    EXPECT_EQ(cluster.SetPreferredNetwork(&exPanId1), CHIP_NO_ERROR);
++
++    {
++        std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> preferred;
++        EXPECT_EQ(cluster.GetPreferredNetwork(preferred), CHIP_NO_ERROR);
++        ASSERT_TRUE(preferred.has_value());
++        EXPECT_TRUE(preferred.value() == exPanId1);
++    }
++
++    // Retracting a network the preference names clears the preference, so the
++    // attribute never points at something that is no longer listed.
++    EXPECT_EQ(cluster.ForgetNetwork(MakeExPanId1()), CHIP_NO_ERROR);
++    EXPECT_FALSE(storage.ContainsNetwork(MakeExPanId1()));
++    {
++        std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> preferred;
++        EXPECT_EQ(cluster.GetPreferredNetwork(preferred), CHIP_NO_ERROR);
++        EXPECT_FALSE(preferred.has_value());
++    }
++
++    // Retracting a network the preference does not name leaves it alone.
++    EXPECT_EQ(cluster.AddOrUpdateNetwork(MakeExPanId1(), ByteSpan(kDataset1)), CHIP_NO_ERROR);
++    EXPECT_EQ(cluster.AddOrUpdateNetwork(MakeExPanId2(), ByteSpan(kDataset2)), CHIP_NO_ERROR);
++    EXPECT_EQ(cluster.SetPreferredNetwork(&exPanId1), CHIP_NO_ERROR);
++    EXPECT_EQ(cluster.ForgetNetwork(MakeExPanId2()), CHIP_NO_ERROR);
++    {
++        std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> preferred;
++        EXPECT_EQ(cluster.GetPreferredNetwork(preferred), CHIP_NO_ERROR);
++        ASSERT_TRUE(preferred.has_value());
++        EXPECT_TRUE(preferred.value() == exPanId1);
++    }
++
++    // Clearing the preference explicitly.
++    EXPECT_EQ(cluster.SetPreferredNetwork(nullptr), CHIP_NO_ERROR);
++    {
++        std::optional<ThreadNetworkDirectoryStorage::ExtendedPanId> preferred;
++        EXPECT_EQ(cluster.GetPreferredNetwork(preferred), CHIP_NO_ERROR);
++        EXPECT_FALSE(preferred.has_value());
++    }
++
++    cluster.Shutdown(ClusterShutdownType::kClusterShutdown);
++}
++
+ // ---------------------------------------------------------------------------
+ // TestThreadNetworksList: list is initially empty; after directly adding
+ // networks to the storage the attribute encodes correct field values.
+-- 
+2.55.0
+
