@@ -1,46 +1,126 @@
-From 0e275f281a19e3175fd02335145600e338b378c5 Mon Sep 17 00:00:00 2001
+From 5ca1f6193cc45051bf3e698d501fc6d6e7c718e3 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Wed, 29 Jul 2026 19:21:36 +1200
-Subject: [PATCH] hostapd: Fix NULL deref in hostapd_eid_ht_operation
+Subject: [PATCH] hostapd: Fix NULL deref and endianness in Extended NSS BW
+ code
 
-hapd->iface->current_mode is NULL whenever hostapd runs without hw
-feature data, which is not an error:
-hostapd_setup_interface_complete_sync() continues when
-hostapd_get_hw_features() fails (commented "Not all drivers support this
-yet, so continue without hw feature data"), skipping the
+170-hostapd-update-cfs0-and-cfs1-for-160MHz.patch adds an Extended NSS
+BW check to hostapd_eid_ht_operation() and hostapd_eid_vht_operation();
+both dereference hapd->iface->current_mode without a NULL check.
+
+current_mode is NULL whenever hostapd runs without hw feature data,
+which is not an error: hostapd_setup_interface_complete_sync() continues
+when hostapd_get_hw_features() fails (commented "Not all drivers support
+this yet, so continue without hw feature data"), skipping the
 hostapd_select_hw_mode() block that would set current_mode. Interface
 setup then proceeds to hostapd_start_beacon() and builds the beacon IEs
 anyway. This is why hostapd_eid_erp_info(),
 hostapd_dfs_start_channel_switch() and many other call sites all check
 current_mode before dereferencing it.
 
-Reaching it requires ieee80211n=1 (the function returns early otherwise)
-together with no hw feature data, i.e. driver=none or any driver whose
-get_hw_feature_data fails.
+Reaching the HT case requires ieee80211n=1 (hostapd_eid_ht_operation()
+returns early otherwise), the VHT case ieee80211ac=1 (all callers of
+hostapd_eid_vht_operation() gate it on hostapd_is_vht_enabled()),
+together with no hw feature data -- i.e. driver=none or any driver whose
+get_hw_feature_data fails. The VHT case is particularly clearly
+unintended: hostapd_eid_vht_capabilities(), called immediately before
+hostapd_eid_vht_operation() at every call site, already returns early
+when current_mode is absent, so hostapd correctly omits the VHT
+Capabilities element and then crashes building VHT Operation.
 
-Treat an absent current_mode as advertising no VHT capabilities, which
-leaves the resulting HT Operation element identical to what upstream
-emitted before the Extended NSS BW check was introduced.
+Treat an absent current_mode as advertising no Extended NSS BW support,
+which leaves both elements identical to what upstream emitted before the
+check was introduced.
+
+Also fix misplaced host_to_le32() calls in the same patch:
+iface->current_mode->vht_capab and the VHT_CAP_* constants are both host
+byte order (u32), so can be compared / masked directly without the
+detour through an le32 local. However in hostapd_eid_vht_capabilities()
+the vht_capabilities_info being built is le32, so constants need
+swapping before application. This endianness issue is not expected to
+affect any OpenWrt target in practice, since the radios that support 160
+/ 80+80 channels are on little-endian platforms.
 
 Signed-off-by: Karsten Sperling <ksperling@apple.com>
 ---
- src/ap/ieee802_11_ht.c | 3 ++-
- 1 file changed, 2 insertions(+), 1 deletion(-)
+ src/ap/ieee802_11_ht.c  |  7 +++----
+ src/ap/ieee802_11_vht.c | 11 +++++------
+ 2 files changed, 8 insertions(+), 10 deletions(-)
 
 diff --git a/src/ap/ieee802_11_ht.c b/src/ap/ieee802_11_ht.c
-index 77b7907e7..47e9ea390 100644
+index 77b7907e7..9661733fe 100644
 --- a/src/ap/ieee802_11_ht.c
 +++ b/src/ap/ieee802_11_ht.c
-@@ -145,7 +145,8 @@ u8 * hostapd_eid_ht_operation(struct hostapd_data *hapd, u8 *eid)
+@@ -127,7 +127,6 @@ no_update:
+ u8 * hostapd_eid_ht_operation(struct hostapd_data *hapd, u8 *eid)
+ {
+ 	struct ieee80211_ht_operation *oper;
+-	le32 vht_capabilities_info;
+ 	u8 *pos = eid;
+ 	u8 chwidth;
+ 
+@@ -145,10 +144,10 @@ u8 * hostapd_eid_ht_operation(struct hostapd_data *hapd, u8 *eid)
  	oper->operation_mode = host_to_le16(hapd->iface->ht_op_mode);
  	set_ht_param(hapd, oper);
  
 -	vht_capabilities_info = host_to_le32(hapd->iface->current_mode->vht_capab);
-+	vht_capabilities_info = host_to_le32(hapd->iface->current_mode ?
-+					     hapd->iface->current_mode->vht_capab : 0);
  	chwidth = hostapd_get_oper_chwidth(hapd->iconf);
- 	if (vht_capabilities_info & VHT_CAP_EXTENDED_NSS_BW_SUPPORT
+-	if (vht_capabilities_info & VHT_CAP_EXTENDED_NSS_BW_SUPPORT
+-		&& ((chwidth == CHANWIDTH_160MHZ) || (chwidth == CHANWIDTH_80P80MHZ))) {
++	if (hapd->iface->current_mode &&
++	    (hapd->iface->current_mode->vht_capab & VHT_CAP_EXTENDED_NSS_BW_SUPPORT) &&
++	    ((chwidth == CHANWIDTH_160MHZ) || (chwidth == CHANWIDTH_80P80MHZ))) {
+ 		oper->operation_mode = host_to_le16(hapd->iconf->vht_oper_centr_freq_seg0_idx << 5);
+ 	}
+ 
+diff --git a/src/ap/ieee802_11_vht.c b/src/ap/ieee802_11_vht.c
+index f77cbdb7e..226c30319 100644
+--- a/src/ap/ieee802_11_vht.c
++++ b/src/ap/ieee802_11_vht.c
+@@ -65,14 +65,14 @@ u8 * hostapd_eid_vht_capabilities(struct hostapd_data *hapd, u8 *eid, u32 nsts)
+ 	}
+ 
+ 	chwidth = hostapd_get_oper_chwidth(hapd->iconf);
+-	if (((host_to_le32(mode->vht_capab)) & VHT_CAP_EXTENDED_NSS_BW_SUPPORT)
++	if ((mode->vht_capab & VHT_CAP_EXTENDED_NSS_BW_SUPPORT)
  		&& ((chwidth == CHANWIDTH_160MHZ) || (chwidth == CHANWIDTH_80P80MHZ))) {
+-		cap->vht_capabilities_info |= VHT_CAP_EXTENDED_NSS_BW_SUPPORT;
++		cap->vht_capabilities_info |= host_to_le32(VHT_CAP_EXTENDED_NSS_BW_SUPPORT);
+ 		cap->vht_capabilities_info &= ~(host_to_le32(VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ));
+ 		cap->vht_capabilities_info &= ~(host_to_le32(VHT_CAP_SUPP_CHAN_WIDTH_160MHZ));
+ 		cap->vht_capabilities_info &= ~(host_to_le32(VHT_CAP_SUPP_CHAN_WIDTH_MASK));
+ 	} else {
+-		cap->vht_capabilities_info &= ~VHT_CAP_EXTENDED_NSS_BW_SUPPORT_MASK;
++		cap->vht_capabilities_info &= ~(host_to_le32(VHT_CAP_EXTENDED_NSS_BW_SUPPORT_MASK));
+ 	}
+ 
+ 	/* Supported MCS set comes from hw */
+@@ -87,7 +87,6 @@ u8 * hostapd_eid_vht_capabilities(struct hostapd_data *hapd, u8 *eid, u32 nsts)
+ u8 * hostapd_eid_vht_operation(struct hostapd_data *hapd, u8 *eid)
+ {
+ 	struct ieee80211_vht_operation *oper;
+-	le32 vht_capabilities_info;
+ 	u8 *pos = eid;
+ 	enum oper_chan_width oper_chwidth =
+ 		hostapd_get_oper_chwidth(hapd->iconf);
+@@ -126,7 +125,6 @@ u8 * hostapd_eid_vht_operation(struct hostapd_data *hapd, u8 *eid)
+ 	oper->vht_op_info_chan_center_freq_seg1_idx = seg1;
+ 
+ 	oper->vht_op_info_chwidth = oper_chwidth;
+-	vht_capabilities_info = host_to_le32(hapd->iface->current_mode->vht_capab);
+ 	if (oper_chwidth == CONF_OPER_CHWIDTH_160MHZ) {
+ 		/*
+ 		 * Convert 160 MHz channel width to new style as interop
+@@ -141,7 +139,8 @@ u8 * hostapd_eid_vht_operation(struct hostapd_data *hapd, u8 *eid)
+ 		else
+ 			oper->vht_op_info_chan_center_freq_seg0_idx += 8;
+ 
+-		if (vht_capabilities_info & VHT_CAP_EXTENDED_NSS_BW_SUPPORT)
++		if (hapd->iface->current_mode &&
++		    (hapd->iface->current_mode->vht_capab & VHT_CAP_EXTENDED_NSS_BW_SUPPORT))
+ 			oper->vht_op_info_chan_center_freq_seg1_idx = 0;
+ 	} else if (oper_chwidth == CONF_OPER_CHWIDTH_80P80MHZ) {
+ 		/*
 -- 
 2.50.1 (Apple Git-155)
 
