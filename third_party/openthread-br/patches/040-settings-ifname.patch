@@ -11,11 +11,9 @@ allows the settings file to remain stable when replacing the RCP dongle.
  src/host/rcp_host.cpp   | 3 +++
  2 files changed, 8 insertions(+)
 
-diff --git a/etc/cmake/options.cmake b/etc/cmake/options.cmake
-index 8183bb19..ce8b7961 100644
 --- a/etc/cmake/options.cmake
 +++ b/etc/cmake/options.cmake
-@@ -253,6 +253,11 @@ else()
+@@ -291,6 +291,11 @@ else()
      target_compile_definitions(otbr-config INTERFACE OTBR_ENABLE_LINK_METRICS_TELEMETRY=0)
  endif()
  
@@ -27,11 +25,9 @@ index 8183bb19..ce8b7961 100644
  option(OTBR_POWER_CALIBRATION "Enable Power Calibration" ON)
  if (OTBR_POWER_CALIBRATION)
      target_compile_definitions(otbr-config INTERFACE OTBR_ENABLE_POWER_CALIBRATION=1)
-diff --git a/src/host/rcp_host.cpp b/src/host/rcp_host.cpp
-index b99de3cf..9eb78c59 100644
 --- a/src/host/rcp_host.cpp
 +++ b/src/host/rcp_host.cpp
-@@ -153,6 +153,9 @@ RcpHost::RcpHost(const char                      *aInterfaceName,
+@@ -153,6 +153,9 @@ RcpHost::RcpHost(const char
          mConfig.mCoprocessorUrls.mUrls[mConfig.mCoprocessorUrls.mNum++] = url;
      }
      mConfig.mSpeedUpFactor = 1;
@@ -41,6 +37,3 @@ index b99de3cf..9eb78c59 100644
  }
  
  RcpHost::~RcpHost(void)
--- 
-2.50.1 (Apple Git-155)
-

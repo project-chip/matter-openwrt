@@ -7,11 +7,9 @@ Subject: [PATCH] Don't require vendor/model names for --radio-version
  src/agent/realmain.cpp | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)
 
-diff --git a/src/agent/realmain.cpp b/src/agent/realmain.cpp
-index 314fd195..cabf6d86 100644
 --- a/src/agent/realmain.cpp
 +++ b/src/agent/realmain.cpp
-@@ -353,14 +353,14 @@ static int realmain(int argc, char *argv[])
+@@ -359,14 +359,14 @@ static int realmain(int argc, char *argv
      }
  
  #ifndef OTBR_VENDOR_NAME
@@ -28,6 +26,3 @@ index 314fd195..cabf6d86 100644
      {
          fprintf(stderr, "Model name must be set.\n");
          ExitNow(ret = EXIT_FAILURE);
--- 
-2.50.1 (Apple Git-155)
-

@@ -1,4 +1,4 @@
-From c2c69b2d4111e3995abd562c267d18b6d2c71a5c Mon Sep 17 00:00:00 2001
+From 30df5c383347b409b85d52ae1dfb0101f594c2a3 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 30 Apr 2026 13:56:58 +1200
 Subject: [PATCH] Ubus: Add blobmsg_get_hex_string for parsing hex values
@@ -14,11 +14,9 @@ Also don't accept ExtendedPanID's < 16 hex characters in "mgmtset" and
  src/openwrt/ubus/ubus_utils.hpp | 12 +++++
  4 files changed, 72 insertions(+), 87 deletions(-)
 
-diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
-index 114d36bf..028e6901 100644
 --- a/src/openwrt/ubus/otubus.cpp
 +++ b/src/openwrt/ubus/otubus.cpp
-@@ -294,9 +294,9 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+@@ -294,9 +294,9 @@ int UbusServer::HandleMgmtSet(ubus_reque
      if (tb[NETWORKKEY] != nullptr)
      {
          dataset.mComponents.mIsNetworkKeyPresent = true;
@@ -31,18 +29,18 @@ index 114d36bf..028e6901 100644
          length = 0;
      }
      if (tb[NETWORKNAME] != nullptr)
-@@ -312,8 +312,8 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+@@ -312,8 +312,8 @@ int UbusServer::HandleMgmtSet(ubus_reque
      if (tb[EXTPANID] != nullptr)
      {
          dataset.mComponents.mIsExtendedPanIdPresent = true;
 -        VerifyOrExit(Hex2Bin(blobmsg_get_string(tb[EXTPANID]), dataset.mExtendedPanId.m8,
--                             sizeof(dataset.mExtendedPanId.m8)) >= 0,
+-                             sizeof(dataset.mExtendedPanId.m8)) == OT_EXT_PAN_ID_SIZE,
 +        VerifyOrExit(blobmsg_get_hex_string_fixed(tb[EXTPANID], dataset.mExtendedPanId.m8,
 +                                                  sizeof(dataset.mExtendedPanId.m8)) > 0,
                       error = OT_ERROR_PARSE);
      }
      if (tb[PANID] != nullptr)
-@@ -331,10 +331,8 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
+@@ -331,10 +331,8 @@ int UbusServer::HandleMgmtSet(ubus_reque
      if (tb[PSKC] != nullptr)
      {
          dataset.mComponents.mIsPskcPresent = true;
@@ -54,7 +52,7 @@ index 114d36bf..028e6901 100644
      }
      dataset.mActiveTimestamp.mSeconds++;
      if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
-@@ -393,8 +391,7 @@ int UbusServer::HandleJoinerAdd(ubus_request_data *aRequest, blob_attr *(&tb)[2]
+@@ -393,8 +391,7 @@ int UbusServer::HandleJoinerAdd(ubus_req
          }
          else
          {
@@ -64,7 +62,7 @@ index 114d36bf..028e6901 100644
              addrPtr = &addr;
          }
      }
-@@ -424,8 +421,7 @@ int UbusServer::HandleJoinerRemove(ubus_request_data *aRequest, blob_attr *(&aAr
+@@ -424,8 +421,7 @@ int UbusServer::HandleJoinerRemove(ubus_
          }
          else
          {
@@ -74,7 +72,7 @@ index 114d36bf..028e6901 100644
              addrPtr = &addr;
          }
      }
-@@ -916,9 +912,7 @@ int UbusServer::HandleSetNetworkKey(ubus_request_data *aRequest, blob_attr *(&aA
+@@ -916,9 +912,7 @@ int UbusServer::HandleSetNetworkKey(ubus
      if (aArgs[0] != nullptr)
      {
          otNetworkKey key;
@@ -85,7 +83,7 @@ index 114d36bf..028e6901 100644
          SuccessOrExit(error = otThreadSetNetworkKey(mHost->GetInstance(), &key));
      }
  exit:
-@@ -937,9 +931,7 @@ int UbusServer::HandleSetPskc(ubus_request_data *aRequest, blob_attr *(&aArgs)[1
+@@ -937,9 +931,7 @@ int UbusServer::HandleSetPskc(ubus_reque
      if (aArgs[0] != nullptr)
      {
          otPskc pskc;
@@ -96,18 +94,18 @@ index 114d36bf..028e6901 100644
          SuccessOrExit(error = otThreadSetPskc(mHost->GetInstance(), &pskc));
      }
  exit:
-@@ -958,8 +950,8 @@ int UbusServer::HandleSetExtPanId(ubus_request_data *aRequest, blob_attr *(&aArg
+@@ -958,8 +950,8 @@ int UbusServer::HandleSetExtPanId(ubus_r
      if (aArgs[0] != nullptr)
      {
          otExtendedPanId extPanId;
 -        char           *input = blobmsg_get_string(aArgs[0]);
--        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId)) >= 0, error = OT_ERROR_PARSE);
+-        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId.m8)) == OT_EXT_PAN_ID_SIZE, error = OT_ERROR_PARSE);
 +        VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extPanId.m8, sizeof(extPanId.m8)) > 0,
 +                     error = OT_ERROR_PARSE);
          error = otThreadSetExtendedPanId(mHost->GetInstance(), &extPanId);
      }
  exit:
-@@ -1018,9 +1010,8 @@ int UbusServer::HandleMacFilterAdd(ubus_request_data *aRequest, blob_attr *(&aAr
+@@ -1018,9 +1010,8 @@ int UbusServer::HandleMacFilterAdd(ubus_
  
      if (aArgs[0] != nullptr)
      {
@@ -119,7 +117,7 @@ index 114d36bf..028e6901 100644
  
          error = otLinkFilterAddAddress(mHost->GetInstance(), &extAddr);
  
-@@ -1038,8 +1029,8 @@ int UbusServer::HandleMacFilterRemove(ubus_request_data *aRequest, blob_attr *(&
+@@ -1038,8 +1029,8 @@ int UbusServer::HandleMacFilterRemove(ub
  
      if (aArgs[0] != nullptr)
      {
@@ -130,7 +128,7 @@ index 114d36bf..028e6901 100644
  
          otLinkFilterRemoveAddress(mHost->GetInstance(), &extAddr);
          error = OT_ERROR_NONE;
-@@ -1165,57 +1156,6 @@ otError UbusServer::ParseLong(char *aString, long &aLong)
+@@ -1165,57 +1156,6 @@ otError UbusServer::ParseLong(char *aStr
      return (*endptr == '\0') ? OT_ERROR_NONE : OT_ERROR_PARSE;
  }
  
@@ -188,15 +186,12 @@ index 114d36bf..028e6901 100644
  // === UloopProcessor ===
  
  UloopProcessor *UloopProcessor::sInstance = nullptr;
-diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
-index 60165981..bda458b3 100644
 --- a/src/openwrt/ubus/otubus.hpp
 +++ b/src/openwrt/ubus/otubus.hpp
-@@ -170,17 +170,6 @@ private:
-      */
+@@ -171,17 +171,6 @@ private:
      otError ParseLong(char *aString, long &aLong);
  
--    /**
+     /**
 -     * This method converts a hex string to binary.
 -     *
 -     * @param[in]  aHex        A pointer to the hex string.
@@ -207,11 +202,10 @@ index 60165981..bda458b3 100644
 -     */
 -    int Hex2Bin(const char *aHex, uint8_t *aBin, uint16_t aBinLength);
 -
-     /**
+-    /**
       * This method append result in message passed to ubus.
       *
-diff --git a/src/openwrt/ubus/ubus_utils.cpp b/src/openwrt/ubus/ubus_utils.cpp
-index 5dc13ee0..feb6dc72 100644
+      * @param[in] aError    The error type of the message.
 --- a/src/openwrt/ubus/ubus_utils.cpp
 +++ b/src/openwrt/ubus/ubus_utils.cpp
 @@ -27,6 +27,9 @@
@@ -224,7 +218,7 @@ index 5dc13ee0..feb6dc72 100644
  
  namespace otbr {
  namespace ubus {
-@@ -45,5 +48,46 @@ int blobmsg_add_hex_string(blob_buf *aBuf, const char *aName, const uint8_t *aDa
+@@ -45,5 +48,46 @@ int blobmsg_add_hex_string(blob_buf *aBu
      return 0;
  }
  
@@ -271,8 +265,6 @@ index 5dc13ee0..feb6dc72 100644
 +
  } // namespace ubus
  } // namespace otbr
-diff --git a/src/openwrt/ubus/ubus_utils.hpp b/src/openwrt/ubus/ubus_utils.hpp
-index dfd3c990..68b18d39 100644
 --- a/src/openwrt/ubus/ubus_utils.hpp
 +++ b/src/openwrt/ubus/ubus_utils.hpp
 @@ -115,6 +115,18 @@ struct UbusMethodHandler
@@ -294,6 +286,3 @@ index dfd3c990..68b18d39 100644
  } // namespace ubus
  } // namespace otbr
  
--- 
-2.50.1 (Apple Git-155)
-

@@ -30,13 +30,13 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=openthread-br
+PKG_VERSION:=2026.10.0
 PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git-with-metadata
 
-PKG_SOURCE_DATE:=2026-05-22
-PKG_SOURCE_VERSION:=9e56492ef19b6d43cc8be4a69ac7ae6376194f69
-PKG_MIRROR_HASH:=2ba2e9aeeeb8c5ee7411f18d3303340bf35817f6c1f12fa35bebeae5974ac45a
+PKG_SOURCE_VERSION:=v$(PKG_VERSION)
+PKG_MIRROR_HASH:=73d348be6467c5197e5ce9449ea177c84626ef9f37f123f0013ad572eb822f94
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE
@@ -69,18 +69,17 @@ endef
 
 define Package/openthread-br
   $(call Package/openthread-br/Default)
-  VARIANT:=default
-  DEPENDS+= +PACKAGE_openthread-br:libdnssd
+  DEPENDS+= +libdnssd
 endef
 
 define Package/openthread-br/description
 $(call Package/openthread-br/Default/description)
 
-This default variant of the package uses mDNSResponder for mDNS / DNS-SD.
+The package uses mDNSResponder for mDNS / DNS-SD.
 endef
 
 define Package/openthread-br/config
-if PACKAGE_openthread-br || PACKAGE_openthread-br-avahi
+if PACKAGE_openthread-br
 config OPENTHREADBR_SHARED_MBEDTLS
 	bool "Use shared mbedTLS library for OpenThread"
 	default n
@@ -90,31 +89,6 @@ config OPENTHREADBR_SHARED_MBEDTLS
 	  This saves around 200kB of flash, but libmbedtls must be compiled
 	  with MBEDTLS_KEY_EXCHANGE_ECJPAKE_ENABLED set to Y.
 endif
-endef
-
-define Package/openthread-br-avahi
-  $(call Package/openthread-br/Default)
-  VARIANT:=avahi
-  PROVIDES:=openthread-br
-  CONFLICTS:=openthread-br
-  DEPENDS+= +PACKAGE_openthread-br-avahi:libavahi-client
-endef
-
-define Package/openthread-br-avahi/description
-$(call Package/openthread-br/Default/description)
-
-This variant of the package uses Avahi for mDNS / DNS-SD.
-endef
-
-
-define Package/openthread-br-luci
-  $(call Package/openthread-br/Default)
-  TITLE+= (LuCI module)
-  DEPENDS:=+luci-lua-runtime @PACKAGE_openthread-br||PACKAGE_openthread-br-avahi
-endef
-
-define Package/openthread-br-luci/description
-LuCI user interface for the OpenThread Border Router.
 endef
 
 # Disable firewall integration due to https://github.com/openthread/ot-br-posix/issues/1675
@@ -128,7 +102,6 @@ CMAKE_OPTIONS+= \
 	-DOTBR_VENDOR_NAME=$(VERSION_MANUFACTURER) \
 	-DOTBR_BORDER_AGENT=ON \
 	-DOTBR_BORDER_ROUTING=ON \
-	-DOTBR_SRP_ADVERTISING_PROXY=ON \
 	-DOTBR_NAT64=OFF \
 	-DOTBR_SETTINGS_FILE_USE_INTERFACE_NAME=ON \
 	-DOT_POSIX_SETTINGS_PATH=\"/etc/openthread\" \
@@ -145,11 +118,7 @@ ifneq ($(CONFIG_OPENTHREADBR_SHARED_MBEDTLS),)
 CMAKE_OPTIONS+= -DOTBR_EXTERNAL_MBEDTLS="mbedtls;mbedcrypto;mbedx509"
 endif
 
-ifeq ($(BUILD_VARIANT),avahi)
-CMAKE_OPTIONS+= -DOTBR_MDNS=avahi
-else
 CMAKE_OPTIONS+= -DOTBR_MDNS=mDNSResponder
-endif
 
 define Package/openthread-br/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config $(1)/etc/uci-defaults $(1)/etc/hotplug.d/usb
@@ -167,20 +136,4 @@ define Package/openthread-br/conffiles
 /etc/openthread/
 endef
 
-Package/openthread-br-avahi/install=$(Package/openthread-br/install)
-Package/openthread-br-avahi/conffiles=$(Package/openthread-br/conffiles)
-
-define Package/openthread-br-luci/install
-	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller/admin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/openwrt/controller/thread.lua $(1)/usr/lib/lua/luci/controller/admin
-
-	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view
-	$(CP) $(PKG_BUILD_DIR)/src/openwrt/view/admin_thread $(1)/usr/lib/lua/luci/view
-
-	$(INSTALL_DIR) $(1)/www/luci-static/resources
-	$(CP) $(PKG_BUILD_DIR)/src/openwrt/handle_error.js $(1)/www/luci-static/resources
-endef
-
 $(eval $(call BuildPackage,openthread-br))
-$(eval $(call BuildPackage,openthread-br-avahi))
-$(eval $(call BuildPackage,openthread-br-luci))
