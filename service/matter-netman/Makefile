@@ -25,9 +25,9 @@ PKG_SOURCE_SUBMODULES:=\
   third_party/nlio/repo
 
 # Hash can be regenerated with make package/matter-netman/check FIXUP=1
-PKG_SOURCE_DATE:=2026-07-30
-PKG_SOURCE_VERSION:=72ecdc2bca57e99b3defea68eb3bcc5bd8bebdbd
-PKG_MIRROR_HASH:=6812910e012294a9b812bc7550e352e981627e8bec932d3634e098be68ebe7fb
+PKG_SOURCE_DATE:=2026-09-08
+PKG_SOURCE_VERSION:=c18068ff2e73e53658b2242d5f2b9f606b652aef
+PKG_MIRROR_HASH:=fc2d38acc794b4af6deb495590f1183392957337c4c23fcd2a095a379c38c5ef
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/connectedhomeip
