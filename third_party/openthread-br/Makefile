@@ -34,9 +34,9 @@ PKG_RELEASE:=1
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git-with-metadata
 
-PKG_SOURCE_DATE:=2026-05-22
-PKG_SOURCE_VERSION:=9e56492ef19b6d43cc8be4a69ac7ae6376194f69
-PKG_MIRROR_HASH:=2ba2e9aeeeb8c5ee7411f18d3303340bf35817f6c1f12fa35bebeae5974ac45a
+PKG_SOURCE_DATE:=2026-09-01
+PKG_SOURCE_VERSION:=fd872ab9d4afdfaf034b3b1154fed08b8b6d1e43
+PKG_MIRROR_HASH:=c323d8c5f8f156bada623cd6cdd8280c8dfd2fd2601ceda2f298b448eef58075
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE
@@ -57,7 +57,7 @@ define Package/openthread-br/Default
   CATEGORY:=Network
   TITLE:=OpenThread Border Router
   URL:=https://github.com/openthread/ot-br-posix
-  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libubox +kmod-usb-acm +kmod-tun +jsonfilter
+  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libubox +libmnl +libnftnl +kmod-nft-core +kmod-nft-nat +kmod-usb-acm +kmod-tun +jsonfilter
 endef
 
 define Package/openthread-br/Default/description
@@ -69,18 +69,17 @@ endef
 
 define Package/openthread-br
   $(call Package/openthread-br/Default)
-  VARIANT:=default
-  DEPENDS+= +PACKAGE_openthread-br:libdnssd
+  DEPENDS+= +libdnssd
 endef
 
 define Package/openthread-br/description
 $(call Package/openthread-br/Default/description)
 
-This default variant of the package uses mDNSResponder for mDNS / DNS-SD.
+The package uses mDNSResponder for mDNS / DNS-SD.
 endef
 
 define Package/openthread-br/config
-if PACKAGE_openthread-br || PACKAGE_openthread-br-avahi
+if PACKAGE_openthread-br
 config OPENTHREADBR_SHARED_MBEDTLS
 	bool "Use shared mbedTLS library for OpenThread"
 	default n
@@ -92,32 +91,15 @@ config OPENTHREADBR_SHARED_MBEDTLS
 endif
 endef
 
-define Package/openthread-br-avahi
-  $(call Package/openthread-br/Default)
-  VARIANT:=avahi
-  PROVIDES:=openthread-br
-  CONFLICTS:=openthread-br
-  DEPENDS+= +PACKAGE_openthread-br-avahi:libavahi-client
-endef
-
-define Package/openthread-br-avahi/description
-$(call Package/openthread-br/Default/description)
-
-This variant of the package uses Avahi for mDNS / DNS-SD.
-endef
-
-
-define Package/openthread-br-luci
-  $(call Package/openthread-br/Default)
-  TITLE+= (LuCI module)
-  DEPENDS:=+luci-lua-runtime @PACKAGE_openthread-br||PACKAGE_openthread-br-avahi
-endef
-
-define Package/openthread-br-luci/description
-LuCI user interface for the OpenThread Border Router.
-endef
-
-# Disable firewall integration due to https://github.com/openthread/ot-br-posix/issues/1675
+# The OT posix platform firewall (OT_FIREWALL) produces ipset/ip6tables
+# rules, which nftables-based OpenWrt does not run, so it stays off - the
+# original reason firewall integration was disabled here
+# (https://github.com/openthread/ot-br-posix/issues/1675). OTBR_NFTABLES
+# is that issue delivered: otbr-agent installs the Thread ingress filter
+# and the NAT44 masquerade in-process, through nftables in an isolated
+# table. It needs nf_tables kernel support at runtime (kmod-nft-core,
+# kmod-nft-nat): with the backend compiled in, a failed firewall install
+# aborts the agent rather than silently forwarding unfiltered traffic.
 CMAKE_OPTIONS+= \
 	-DOTBR_GIT_VERSION=$(call GitWithMetadata/resolve,OTBR_GIT_VERSION)$(if $(PKG_RELEASE),-r$(PKG_RELEASE)) \
 	-DOT_PACKAGE_VERSION=$(call GitWithMetadata/resolve,OT_GIT_VERSION) \
@@ -128,8 +110,8 @@ CMAKE_OPTIONS+= \
 	-DOTBR_VENDOR_NAME=$(VERSION_MANUFACTURER) \
 	-DOTBR_BORDER_AGENT=ON \
 	-DOTBR_BORDER_ROUTING=ON \
-	-DOTBR_SRP_ADVERTISING_PROXY=ON \
 	-DOTBR_NAT64=OFF \
+	-DOTBR_NFTABLES=ON \
 	-DOTBR_SETTINGS_FILE_USE_INTERFACE_NAME=ON \
 	-DOT_POSIX_SETTINGS_PATH=\"/etc/openthread\" \
 	-DOT_FIREWALL=OFF \
@@ -145,15 +127,12 @@ ifneq ($(CONFIG_OPENTHREADBR_SHARED_MBEDTLS),)
 CMAKE_OPTIONS+= -DOTBR_EXTERNAL_MBEDTLS="mbedtls;mbedcrypto;mbedx509"
 endif
 
-ifeq ($(BUILD_VARIANT),avahi)
-CMAKE_OPTIONS+= -DOTBR_MDNS=avahi
-else
 CMAKE_OPTIONS+= -DOTBR_MDNS=mDNSResponder
-endif
 
 define Package/openthread-br/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config $(1)/etc/uci-defaults $(1)/etc/hotplug.d/usb
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config $(1)/etc/uci-defaults $(1)/etc/hotplug.d/usb $(1)/usr/share/otbr
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/sbin/otbr-agent $(1)/usr/sbin
+	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/share/otbr/nftables-backend $(1)/usr/share/otbr
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/sbin/ot-ctl $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/otbr-rcp $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/otbr-agent.init $(1)/etc/init.d/otbr-agent
@@ -167,20 +146,4 @@ define Package/openthread-br/conffiles
 /etc/openthread/
 endef
 
-Package/openthread-br-avahi/install=$(Package/openthread-br/install)
-Package/openthread-br-avahi/conffiles=$(Package/openthread-br/conffiles)
-
-define Package/openthread-br-luci/install
-	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller/admin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/openwrt/controller/thread.lua $(1)/usr/lib/lua/luci/controller/admin
-
-	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view
-	$(CP) $(PKG_BUILD_DIR)/src/openwrt/view/admin_thread $(1)/usr/lib/lua/luci/view
-
-	$(INSTALL_DIR) $(1)/www/luci-static/resources
-	$(CP) $(PKG_BUILD_DIR)/src/openwrt/handle_error.js $(1)/www/luci-static/resources
-endef
-
 $(eval $(call BuildPackage,openthread-br))
-$(eval $(call BuildPackage,openthread-br-avahi))
-$(eval $(call BuildPackage,openthread-br-luci))
