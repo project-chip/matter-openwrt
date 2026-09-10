@@ -117,14 +117,6 @@ groups:
       teams: [reviewers-cablelabs]
     reviews:
       request: 0 # Do not auto-add
-  shared-reviewers-dyson:
-    type: optional
-    conditions:
-      - files.include('*')
-    reviewers:
-      teams: [reviewers-dyson]
-    reviews:
-      request: 0 # Do not auto-add
   shared-reviewers-espressif:
     type: optional
     conditions:
@@ -165,6 +157,14 @@ groups:
       teams: [reviewers-irobot]
     reviews:
       request: 0 # Do not auto-add
+  shared-reviewers-ikea:
+    type: optional
+    conditions:
+      - files.include('*')
+    reviewers:
+      teams: [reviewers-ikea]
+    reviews:
+      request: 0 # Do not auto-add
   shared-reviewers-lg:
     type: optional
     conditions:
@@ -173,14 +173,14 @@ groups:
       teams: [reviewers-lg]
     reviews:
       request: 0 # Do not auto-add
-  shared-reviewers-logitech:
+  shared-reviewers-morsemicro:
     type: optional
     conditions:
       - files.include('*')
     reviewers:
-      teams: [reviewers-logitech]
+      teams: [reviewers-morsemicro]
     reviews:
-      request: 0 # Requested to be only on demand
+      request: 0 # Do not auto-add
   shared-reviewers-nordic:
     type: optional
     conditions:
