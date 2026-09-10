@@ -2,9 +2,23 @@
 	"user": "matter",
 	"access": {
 		"otbr": {
-			"methods": ["*"]
+			"methods": [
+				"*"
+			]
+		},
+		"network.wireless": {
+			"methods": [
+				"status"
+			]
 		}
 	},
-	"subscribe": [ "otbr" ],
-	"listen": [ "ubus.object.*" ]
+	"subscribe": [
+		"otbr"
+	],
+	"listen": [
+		"ubus.object.*"
+	],
+	"publish": [
+		"matter"
+	]
 }

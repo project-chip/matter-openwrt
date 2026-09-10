@@ -1,4 +1,4 @@
-From c2c69b2d4111e3995abd562c267d18b6d2c71a5c Mon Sep 17 00:00:00 2001
+From 30df5c383347b409b85d52ae1dfb0101f594c2a3 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 30 Apr 2026 13:56:58 +1200
 Subject: [PATCH] Ubus: Add blobmsg_get_hex_string for parsing hex values
@@ -15,7 +15,7 @@ Also don't accept ExtendedPanID's < 16 hex characters in "mgmtset" and
  4 files changed, 72 insertions(+), 87 deletions(-)
 
 diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
-index 114d36bf..028e6901 100644
+index ae1d7d60..028e6901 100644
 --- a/src/openwrt/ubus/otubus.cpp
 +++ b/src/openwrt/ubus/otubus.cpp
 @@ -294,9 +294,9 @@ int UbusServer::HandleMgmtSet(ubus_request_data *aRequest, blob_attr *(&tb)[6])
@@ -36,7 +36,7 @@ index 114d36bf..028e6901 100644
      {
          dataset.mComponents.mIsExtendedPanIdPresent = true;
 -        VerifyOrExit(Hex2Bin(blobmsg_get_string(tb[EXTPANID]), dataset.mExtendedPanId.m8,
--                             sizeof(dataset.mExtendedPanId.m8)) >= 0,
+-                             sizeof(dataset.mExtendedPanId.m8)) == OT_EXT_PAN_ID_SIZE,
 +        VerifyOrExit(blobmsg_get_hex_string_fixed(tb[EXTPANID], dataset.mExtendedPanId.m8,
 +                                                  sizeof(dataset.mExtendedPanId.m8)) > 0,
                       error = OT_ERROR_PARSE);
@@ -101,7 +101,7 @@ index 114d36bf..028e6901 100644
      {
          otExtendedPanId extPanId;
 -        char           *input = blobmsg_get_string(aArgs[0]);
--        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId)) >= 0, error = OT_ERROR_PARSE);
+-        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId.m8)) == OT_EXT_PAN_ID_SIZE, error = OT_ERROR_PARSE);
 +        VerifyOrExit(blobmsg_get_hex_string_fixed(aArgs[0], extPanId.m8, sizeof(extPanId.m8)) > 0,
 +                     error = OT_ERROR_PARSE);
          error = otThreadSetExtendedPanId(mHost->GetInstance(), &extPanId);
@@ -294,6 +294,3 @@ index dfd3c990..68b18d39 100644
  } // namespace ubus
  } // namespace otbr
  
--- 
-2.50.1 (Apple Git-155)
-

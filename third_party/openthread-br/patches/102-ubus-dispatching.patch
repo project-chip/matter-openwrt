@@ -1,4 +1,4 @@
-From 4c2e015785327a860487fe2bd08de1283547b8f1 Mon Sep 17 00:00:00 2001
+From 7de01fde24b99bd0bcb5a91ea80ce771c47bada9 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 3 Oct 2025 17:08:49 +1300
 Subject: [PATCH] Ubus: Handle dispatching via a template to avoid boilerplate
@@ -7,14 +7,14 @@ Subject: [PATCH] Ubus: Handle dispatching via a template to avoid boilerplate
 Also get rid of the remaining statics / globals in UbusServer.
 Fix uninitialized otLinkModeConfig in "setmode" handler.
 ---
- src/openwrt/ubus/otubus.cpp     | 1577 ++++++++++++-------------------
+ src/openwrt/ubus/otubus.cpp     | 1578 ++++++++++++-------------------
  src/openwrt/ubus/otubus.hpp     |  982 ++-----------------
  src/openwrt/ubus/ubus_utils.hpp |  117 +++
- 3 files changed, 799 insertions(+), 1877 deletions(-)
+ 3 files changed, 799 insertions(+), 1878 deletions(-)
  create mode 100644 src/openwrt/ubus/ubus_utils.hpp
 
 diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
-index a18af82a..78860e40 100644
+index be85f1e5..2123cdf9 100644
 --- a/src/openwrt/ubus/otubus.cpp
 +++ b/src/openwrt/ubus/otubus.cpp
 @@ -34,6 +34,8 @@
@@ -1148,8 +1148,7 @@ index a18af82a..78860e40 100644
 +    AppendResult(OT_ERROR_NONE, &mContext, aRequest);
 +    return 0;
 +}
- 
--        SuccessOrExit(error = otThreadGetLeaderData(mHost->GetInstance(), &leaderData));
++
 +int UbusServer::HandlePartitionId(ubus_request_data *aRequest)
 +{
 +    blobmsg_add_u32(&mBuf, "Partitionid", otThreadGetPartitionId(mHost->GetInstance()));
@@ -1157,25 +1156,26 @@ index a18af82a..78860e40 100644
 +    return 0;
 +}
  
--        sJsonUri = blobmsg_open_table(&mBuf, "leaderdata");
+-        SuccessOrExit(error = otThreadGetLeaderData(mHost->GetInstance(), &leaderData));
 +int UbusServer::HandleLeaderData(ubus_request_data *aRequest)
 +{
 +    otError      error = OT_ERROR_NONE;
 +    void        *jsonTable;
 +    otLeaderData leaderData;
  
+-        sJsonUri = blobmsg_open_table(&mBuf, "leaderdata");
++    SuccessOrExit(error = otThreadGetLeaderData(mHost->GetInstance(), &leaderData));
+ 
 -        blobmsg_add_u32(&mBuf, "PartitionId", leaderData.mPartitionId);
 -        blobmsg_add_u32(&mBuf, "Weighting", leaderData.mWeighting);
 -        blobmsg_add_u32(&mBuf, "DataVersion", leaderData.mDataVersion);
 -        blobmsg_add_u32(&mBuf, "StableDataVersion", leaderData.mStableDataVersion);
 -        blobmsg_add_u32(&mBuf, "LeaderRouterId", leaderData.mLeaderRouterId);
-+    SuccessOrExit(error = otThreadGetLeaderData(mHost->GetInstance(), &leaderData));
++    jsonTable = blobmsg_open_table(&mBuf, "leaderdata");
  
 -        blobmsg_close_table(&mBuf, sJsonUri);
 -    }
 -    else if (!strcmp(aAction, "networkdata"))
-+    jsonTable = blobmsg_open_table(&mBuf, "leaderdata");
-+
 +    blobmsg_add_u32(&mBuf, "PartitionId", leaderData.mPartitionId);
 +    blobmsg_add_u32(&mBuf, "Weighting", leaderData.mWeighting);
 +    blobmsg_add_u32(&mBuf, "DataVersion", leaderData.mDataVersion);
@@ -1428,7 +1428,7 @@ index a18af82a..78860e40 100644
  
  exit:
      if (aError != OT_ERROR_NONE)
-@@ -1374,198 +915,285 @@ exit:
+@@ -1374,199 +915,285 @@ exit:
      }
  }
  
@@ -1592,7 +1592,7 @@ index a18af82a..78860e40 100644
 -        struct blob_attr *tb[SET_NETWORK_MAX];
 +        otExtendedPanId extPanId;
 +        char           *input = blobmsg_get_string(aArgs[0]);
-+        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId)) >= 0, error = OT_ERROR_PARSE);
++        VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId.m8)) == OT_EXT_PAN_ID_SIZE, error = OT_ERROR_PARSE);
 +        error = otThreadSetExtendedPanId(mHost->GetInstance(), &extPanId);
 +    }
 +exit:
@@ -1626,14 +1626,15 @@ index a18af82a..78860e40 100644
 -        {
 -            otExtendedPanId extPanId;
 -            char           *input = blobmsg_get_string(tb[SETNETWORK]);
--            VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId)) >= 0, error = OT_ERROR_PARSE);
+-            VerifyOrExit(Hex2Bin(input, extPanId.m8, sizeof(extPanId.m8)) == OT_EXT_PAN_ID_SIZE,
+-                         error = OT_ERROR_PARSE);
 -            error = otThreadSetExtendedPanId(mHost->GetInstance(), &extPanId);
 -        }
 -    }
 -    else if (!strcmp(aAction, "mode"))
 +    if (aArgs[0] != nullptr)
      {
--        otLinkModeConfig  linkMode;
+-        otLinkModeConfig  linkMode = {};
 -        struct blob_attr *tb[SET_NETWORK_MAX];
 -
 -        blobmsg_parse(setModePolicy, SET_NETWORK_MAX, tb, blob_data(aMsg), blob_len(aMsg));
@@ -1861,7 +1862,7 @@ index a18af82a..78860e40 100644
  void UbusServer::GetState(otInstance *aInstance, char *aState)
  {
      switch (otThreadGetDeviceRole(aInstance))
-@@ -1595,14 +1223,6 @@ void UbusServer::GetState(otInstance *aInstance, char *aState)
+@@ -1596,14 +1223,6 @@ void UbusServer::GetState(otInstance *aInstance, char *aState)
      }
  }
  
@@ -1876,7 +1877,7 @@ index a18af82a..78860e40 100644
  otError UbusServer::ParseLong(char *aString, long &aLong)
  {
      char *endptr;
-@@ -1738,7 +1358,7 @@ void UloopProcessor::Process(const MainloopContext &aMainloop)
+@@ -1739,7 +1358,7 @@ void UloopProcessor::Process(const MainloopContext &aMainloop)
  UBusAgent::UBusAgent(otbr::Host::RcpHost &aHost)
      : ubus_context{}
      , uloop_timeout{}
@@ -1885,7 +1886,7 @@ index a18af82a..78860e40 100644
  {
  }
  
-@@ -1756,8 +1376,7 @@ void UBusAgent::Init()
+@@ -1757,8 +1376,7 @@ void UBusAgent::Init()
      VerifyOrDie(ubus_connect_ctx(&Context(), nullptr) == 0, "Unable to connect to ubus");
      UbusConnected();
  
@@ -3051,6 +3052,3 @@ index 00000000..74a8da29
 +} // namespace otbr
 +
 +#endif // OTBR_AGENT_UBUS_UTILS_HPP_
--- 
-2.50.1 (Apple Git-155)
-

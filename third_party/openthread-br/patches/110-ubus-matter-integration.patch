@@ -1,4 +1,4 @@
-From 270d44915e4d64c51e02ce5f8297d4282e827dc7 Mon Sep 17 00:00:00 2001
+From 4e6bdc8e61569f9f204b56f9a4acd92b3ddebda0 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Sat, 4 Oct 2025 01:44:01 +1300
 Subject: [PATCH] Ubus: Add methods and notifications for Matter integration
@@ -187,6 +187,3 @@ index 676a10b9..02c49116 100644
      // === Internal helpers ===
  
      static UbusServer &PrepareInvocation(ubus_object *aObj, ubus_request_data *aRequest, const char *aMethod);
--- 
-2.50.1 (Apple Git-155)
-

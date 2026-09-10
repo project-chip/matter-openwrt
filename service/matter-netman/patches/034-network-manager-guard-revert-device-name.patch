@@ -1,0 +1,181 @@
+From 8fe1864461923fe02593ca3465d42e9119dc4661 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Tue, 28 Jul 2026 05:01:24 +0200
+Subject: [PATCH] [network-manager] guard revert and advertise the device name
+
+Two commissioning-flow fixes surfaced by pairing the border router with
+an iOS controller:
+
+The fail-safe expiry handler in the TBRM cluster reverts the active
+dataset unconditionally, for every expired fail-safe. A commissioning
+attempt that fails for unrelated reasons, such as an attestation policy
+rejection, therefore wiped a Thread network the router had been
+provisioned with outside Matter. Track whether an uncommitted dataset
+activation exists and make RevertActiveDataset a no-op otherwise, which
+is what reverting means.
+
+The commissionable DNS-SD advertisement carried no device name, so
+commissioners offered a generic "Matter Accessory" placeholder when
+pairing. Advertise the configured name.
+
+Assisted-By: Claude Opus 5
+---
+ .../linux/ThreadBROpenThreadUbus.cpp          | 50 ++++++++++++++++++-
+ .../linux/ThreadBROpenThreadUbus.h            | 17 ++++++-
+ .../linux/include/CHIPProjectAppConfig.h      |  4 ++
+ 3 files changed, 69 insertions(+), 2 deletions(-)
+
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+index 0803ce7831..24b22e9836 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.cpp
+@@ -53,6 +53,12 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::Init(AttributeChangeCallback * at
+                         static_cast<decltype(this)>(req->priv)->OnDataReceived(msg, false);
+                     }),
+                     self, kInvokeTimeout);
++        // A revert may have run while otbr was away; its deprovision could
++        // not be delivered then, so deliver it now.
++        if (self->mRevertPending && self->SubmitDeprovision() == CHIP_NO_ERROR)
++        {
++            self->mRevertPending = false;
++        }
+     });
+     mOtbr.SetNotificationCallback([](UbusWatch & watch, void * appState, ubus_request_data * req, const char * notification,
+                                      blob_attr * msg) { static_cast<decltype(this)>(appState)->OnDataReceived(msg, true); });
+@@ -168,6 +174,7 @@ void OpenThreadUbusBorderRouterDelegate::SetActiveDataset(const Thread::Operatio
+     mActiveDataset           = activeDataset;
+     mActivateDatasetCallback = callback;
+     mActivateDatasetSequence = sequenceNum;
++    mActivationPending       = true;
+     return;
+ 
+ exit:
+@@ -205,10 +212,20 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::SetPendingDataset(const Thread::O
+ 
+ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::RevertActiveDataset()
+ {
++    // The fail-safe expiry handler calls this for every expired fail-safe,
++    // whether or not it carried a dataset activation: a failed commissioning
++    // attempt by an unrelated controller must not wipe the network. Only an
++    // activation that has not been committed may be reverted.
++    VerifyOrReturnError(mActivationPending, CHIP_NO_ERROR);
++    mActivationPending = false;
++    // The provision may still be in flight; without the callback its
++    // completion is a no-op instead of completing the reverted activation
++    // (and a new attempt meanwhile would read as Busy).
++    mActivateDatasetCallback = nullptr;
++
+     // SetActiveDataset is only accepted when no dataset is configured, so
+     // reverting means returning to the unprovisioned state rather than
+     // restoring a previous dataset.
+-    VerifyOrReturnError(mOtbr.Resolved(), CHIP_ERROR_NOT_CONNECTED);
+ 
+     // deprovision detaches gracefully before erasing, so its reply can be
+     // seconds away; fire the request asynchronously and let the otbr
+@@ -217,6 +234,20 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::RevertActiveDataset()
+     mActiveDataset.Clear();
+     mAttributeChangeCallback->ReportAttributeChanged(ActiveDatasetTimestamp::Id);
+ 
++    CHIP_ERROR err = SubmitDeprovision();
++    if (err != CHIP_NO_ERROR)
++    {
++        // The fail-safe fires once; remember the revert so the deprovision is
++        // delivered when otbr comes back rather than never.
++        mRevertPending = true;
++    }
++    return err;
++}
++
++CHIP_ERROR OpenThreadUbusBorderRouterDelegate::SubmitDeprovision()
++{
++    VerifyOrReturnError(mOtbr.Resolved(), CHIP_ERROR_NOT_CONNECTED);
++
+     auto * invoke    = new ProvisionRequest;
+     invoke->delegate = this;
+     if (ubus_invoke_async(&mUbusManager.Context(), mOtbr.ObjectID(), "deprovision", nullptr, &invoke->req))
+@@ -235,6 +266,14 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::RevertActiveDataset()
+         if (ret != 0 || self->otError != 0)
+         {
+             ChipLogError(AppServer, "deprovision failed: ubus %d, otError %u", ret, self->otError);
++            // otbr kept state this delegate no longer reports. Pull its truth
++            // back into the cache so the two do not quietly diverge; a
++            // connection-failed completion needs no resync and the context
++            // may already be gone.
++            if (ret != UBUS_STATUS_CONNECTION_FAILED)
++            {
++                self->delegate->ResyncFromOtbr();
++            }
+         }
+         delete self;
+     };
+@@ -243,6 +282,15 @@ CHIP_ERROR OpenThreadUbusBorderRouterDelegate::RevertActiveDataset()
+     return CHIP_NO_ERROR;
+ }
+ 
++void OpenThreadUbusBorderRouterDelegate::ResyncFromOtbr()
++{
++    VerifyOrReturn(mOtbr.Resolved());
++    ubus_invoke(&mUbusManager.Context(), mOtbr.ObjectID(), "status", nullptr, ([](ubus_request * req, int type, blob_attr * msg) {
++        static_cast<OpenThreadUbusBorderRouterDelegate *>(req->priv)->OnDataReceived(msg, false);
++    }),
++                this, kInvokeTimeout);
++}
++
+ void OpenThreadUbusBorderRouterDelegate::OnDataReceived(blob_attr * msg, bool notification)
+ {
+     BlobMsgField<ByteSpan, CHIP_CTST("BorderAgentId")> borderAgentID;
+diff --git a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+index 83c7b1a8b3..ce53dcc53a 100644
+--- a/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
++++ b/examples/network-manager-app/linux/ThreadBROpenThreadUbus.h
+@@ -42,12 +42,18 @@ public:
+     // otbr implements MGMT_PENDING_SET via its set_pending method, so a running
+     // network can be migrated rather than only formed.
+     bool GetPanChangeSupported() override { return true; }
+-    CHIP_ERROR CommitActiveDataset() override { return CHIP_NO_ERROR; }
++    CHIP_ERROR CommitActiveDataset() override
++    {
++        mActivationPending = false;
++        return CHIP_NO_ERROR;
++    }
+     CHIP_ERROR RevertActiveDataset() override;
+     CHIP_ERROR SetPendingDataset(const chip::Thread::OperationalDataset & pendingDataset) override;
+ 
+ private:
+     void OnDataReceived(blob_attr * msg, bool notification);
++    CHIP_ERROR SubmitDeprovision();
++    void ResyncFromOtbr();
+ 
+     // Invokes an otbr method that takes a hex encoded dataset argument.
+     CHIP_ERROR InvokeWithDataset(const char * method, const Thread::OperationalDataset & dataset);
+@@ -64,6 +70,15 @@ private:
+     Thread::OperationalDataset mPendingDataset;
+     ActivateDatasetCallback * mActivateDatasetCallback = nullptr;
+     uint32_t mActivateDatasetSequence;
++    // An activation that has not been committed yet. Only such an activation
++    // may be reverted: the fail-safe expiry handler reverts unconditionally,
++    // including for fail-safes that never touched the dataset, and reverting
++    // then would wipe a network provisioned outside Matter.
++    bool mActivationPending = false;
++    // A revert whose deprovision could not be delivered. The fail-safe fires
++    // once, so without this the dataset would stay on the router forever if
++    // otbr happened to be away at that moment; retried when it comes back.
++    bool mRevertPending = false;
+ };
+ 
+ } // namespace chip
+diff --git a/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h b/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
+index 71b853be2c..fb2ed7e32a 100644
+--- a/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
++++ b/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
+@@ -20,6 +20,10 @@
+ 
+ #define CHIP_DEVICE_CONFIG_DEVICE_TYPE 144 // 0x0090 Network Infrastructure Manager
+ #define CHIP_DEVICE_CONFIG_DEVICE_NAME "Network Infrastructure Manager"
++// Advertise the device name and type while commissionable; without
++// them, commissioners fall back to a generic accessory placeholder.
++#define CHIP_DEVICE_CONFIG_ENABLE_COMMISSIONABLE_DEVICE_NAME 1
++#define CHIP_DEVICE_CONFIG_ENABLE_COMMISSIONABLE_DEVICE_TYPE 1
+ #define CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_ID 0x8013
+ 
+ // Sufficient space for ArlReviewEvent of several fabrics.

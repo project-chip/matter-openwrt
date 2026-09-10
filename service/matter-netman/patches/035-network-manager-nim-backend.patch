@@ -1,0 +1,517 @@
+From a8844c9e2533b510ac4735dbbda802aa70a5dee3 Mon Sep 17 00:00:00 2001
+From: Christian Glombek <c.glombek@cosa.systems>
+Date: Sun, 23 Aug 2026 10:25:11 +0200
+Subject: [PATCH] [network-manager] put the OS integration behind a backend
+ interface
+
+The example is a Network Infrastructure Manager: it does not join
+networks, it serves them. What it serves comes from the operating system
+it runs on -- on OpenWrt the border router from otbr-agent and a "matter"
+object for the router's UI, over ubus -- while the clusters and
+everything that reads their state are the same everywhere. main.cpp had
+the two mixed under MATTER_ENABLE_UBUS, so a second operating system
+would have meant a third copy of the shared logic.
+
+Separate them. NimBackend is the seam: the Thread Border Router
+Management delegate, the Wi-Fi credential source, the OS-facing control
+surface, and the backend's place in startup and shutdown. main.cpp
+keeps only what is common and talks to GetNimBackend(). The OpenWrt
+backend wraps the ubus manager, the otbr delegate and the "matter"
+object; the fake one the in-memory delegate and the demo credentials
+the standalone build always had.
+
+The build selects the backend with matter_nim_backend: "fake" (the
+default, the standalone build) or "ubus" (OpenWrt). "dbus" --
+NetworkManager and otbr-agent over D-Bus -- is named and refused until
+it exists. matter_enable_ubus stays as an alias for "ubus", so the
+OpenWrt packaging keeps building.
+
+Behaviour is unchanged for both existing builds.
+
+Assisted-By: Claude Fable 5
+---
+ examples/network-manager-app/linux/BUILD.gn   | 28 ++++++-
+ .../network-manager-app/linux/NimBackend.h    | 76 +++++++++++++++++++
+ .../linux/NimBackendFake.cpp                  | 73 ++++++++++++++++++
+ .../linux/NimBackendUbus.cpp                  | 68 +++++++++++++++++
+ .../linux/NimBackendUbus.h                    | 49 ++++++++++++
+ .../linux/include/CHIPProjectAppConfig.h      |  4 -
+ examples/network-manager-app/linux/main.cpp   | 54 ++++++-------
+ 7 files changed, 314 insertions(+), 38 deletions(-)
+ create mode 100644 examples/network-manager-app/linux/NimBackend.h
+ create mode 100644 examples/network-manager-app/linux/NimBackendFake.cpp
+ create mode 100644 examples/network-manager-app/linux/NimBackendUbus.cpp
+ create mode 100644 examples/network-manager-app/linux/NimBackendUbus.h
+
+diff --git a/examples/network-manager-app/linux/BUILD.gn b/examples/network-manager-app/linux/BUILD.gn
+index 580f03f830..3374286b14 100644
+--- a/examples/network-manager-app/linux/BUILD.gn
++++ b/examples/network-manager-app/linux/BUILD.gn
+@@ -16,12 +16,28 @@ import("//build_overrides/build.gni")
+ import("//build_overrides/chip.gni")
+ 
+ declare_args() {
+-  # Enable OpenWrt ubus integration
++  # The operating system this network manager is built for:
++  #   "fake"  no OS integration: demo Wi-Fi credentials and an in-memory
++  #           Thread border router, for standalone testing
++  #   "ubus"  OpenWrt: otbr-agent and procd over ubus
++  #   "dbus"  NetworkManager and otbr-agent over D-Bus (not implemented yet)
++  matter_nim_backend = "fake"
++
++  # Deprecated: the same as matter_nim_backend = "ubus".
+   matter_enable_ubus = false
+ }
+ 
++nim_backend = matter_nim_backend
++if (matter_enable_ubus) {
++  nim_backend = "ubus"
++}
++assert(nim_backend == "fake" || nim_backend == "ubus",
++       "matter_nim_backend must be \"fake\" or \"ubus\" (\"dbus\" is reserved and not implemented yet), got \"" +
++           nim_backend + "\"")
++
+ executable("matter-network-manager-app") {
+   sources = [
++    "NimBackend.h",
+     "include/CHIPProjectAppConfig.h",
+     "main.cpp",
+   ]
+@@ -36,11 +52,12 @@ executable("matter-network-manager-app") {
+   defines = []
+   include_dirs = [ "include" ]
+ 
+-  if (matter_enable_ubus) {
+-    defines += [ "MATTER_ENABLE_UBUS=1" ]
++  if (nim_backend == "ubus") {
+     sources += [
+       "MatterUbusService.cpp",
+       "MatterUbusService.h",
++      "NimBackendUbus.cpp",
++      "NimBackendUbus.h",
+       "ThreadBROpenThreadUbus.cpp",
+       "ThreadBROpenThreadUbus.h",
+       "UboxUtils.cpp",
+@@ -55,7 +72,10 @@ executable("matter-network-manager-app") {
+       "ubus",
+     ]
+   } else {
+-    sources += [ "ThreadBRFake.h" ]
++    sources += [
++      "NimBackendFake.cpp",
++      "ThreadBRFake.h",
++    ]
+   }
+ 
+   output_dir = root_out_dir
+diff --git a/examples/network-manager-app/linux/NimBackend.h b/examples/network-manager-app/linux/NimBackend.h
+new file mode 100644
+index 0000000000..e8cb29631f
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimBackend.h
+@@ -0,0 +1,76 @@
++/*
++ *
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#pragma once
++
++#include <app/clusters/thread-border-router-management-server/thread-br-delegate.h>
++#include <lib/core/CHIPError.h>
++
++namespace chip {
++
++namespace app {
++namespace Clusters {
++class WiFiNetworkManagementCluster;
++} // namespace Clusters
++} // namespace app
++
++// The operating-system side of the network manager.
++//
++// A Network Infrastructure Manager does not join networks, it serves them: the
++// access point credentials the Wi-Fi Network Management cluster hands out, the
++// border router behind Thread Border Router Management, and a control surface
++// the OS uses to open the commissioning window. Where those come from differs
++// per OS -- otbr-agent and procd over ubus on OpenWrt; NetworkManager and
++// otbr-agent over D-Bus elsewhere -- while the clusters and everything that
++// reads the cluster state are the same everywhere. This interface is the seam
++// between the two: main.cpp only knows this class, and the build selects one
++// implementation of it.
++class NimBackend
++{
++public:
++    virtual ~NimBackend() = default;
++
++    // A human-readable name, for the startup log.
++    virtual const char * Name() const = 0;
++
++    // Before the Matter stack initialises, once the command line is parsed.
++    // Transport connections and providers the stack consults during its own
++    // initialisation belong here.
++    virtual CHIP_ERROR EarlyInit() = 0;
++
++    // The delegate behind Thread Border Router Management. Owned by the
++    // backend; constructed on first use, which the cluster init callback
++    // makes.
++    virtual app::Clusters::ThreadBorderRouterManagement::Delegate & BorderRouterDelegate() = 0;
++
++    // Feeds the cluster with the access point credentials this node shares,
++    // now and whenever they change. Returns CHIP_ERROR_NOT_IMPLEMENTED if this
++    // backend has nothing to share; the cluster then holds no credentials.
++    virtual CHIP_ERROR StartWiFiCredentialSharing(app::Clusters::WiFiNetworkManagementCluster & cluster) = 0;
++
++    // After every cluster is up: publish the OS-facing control surface, if
++    // any.
++    virtual CHIP_ERROR Start() = 0;
++
++    virtual void Shutdown() = 0;
++};
++
++// The backend this build was made for.
++NimBackend & GetNimBackend();
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/NimBackendFake.cpp b/examples/network-manager-app/linux/NimBackendFake.cpp
+new file mode 100644
+index 0000000000..a048935c63
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimBackendFake.cpp
+@@ -0,0 +1,73 @@
++/*
++ *
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#include "NimBackend.h"
++#include "ThreadBRFake.h"
++
++#include <app/clusters/wifi-network-management-server/WiFiNetworkManagementCluster.h>
++#include <lib/support/CodeUtils.h>
++#include <lib/support/Span.h>
++
++#include <optional>
++
++namespace chip {
++
++namespace {
++
++// No operating system behind it: demo access point credentials and a border
++// router delegate that keeps its datasets in memory, for standalone testing.
++class FakeNimBackend final : public NimBackend
++{
++public:
++    const char * Name() const override { return "standalone (no OS integration)"; }
++
++    CHIP_ERROR EarlyInit() override { return CHIP_NO_ERROR; }
++
++    app::Clusters::ThreadBorderRouterManagement::Delegate & BorderRouterDelegate() override
++    {
++        if (!mDelegate.has_value())
++        {
++            mDelegate.emplace();
++        }
++        return *mDelegate;
++    }
++
++    CHIP_ERROR StartWiFiCredentialSharing(app::Clusters::WiFiNetworkManagementCluster & cluster) override
++    {
++        return cluster.SetNetworkCredentials(ByteSpan::fromCharSpan("MatterAP"_span),
++                                             ByteSpan::fromCharSpan("Setec Astronomy"_span));
++    }
++
++    CHIP_ERROR Start() override { return CHIP_NO_ERROR; }
++
++    void Shutdown() override {}
++
++private:
++    std::optional<FakeBorderRouterDelegate> mDelegate;
++};
++
++FakeNimBackend sBackend;
++
++} // namespace
++
++NimBackend & GetNimBackend()
++{
++    return sBackend;
++}
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/NimBackendUbus.cpp b/examples/network-manager-app/linux/NimBackendUbus.cpp
+new file mode 100644
+index 0000000000..72efde7eb1
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimBackendUbus.cpp
+@@ -0,0 +1,68 @@
++/*
++ *
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#include "NimBackendUbus.h"
++
++#include <lib/support/CodeUtils.h>
++
++namespace chip {
++
++namespace {
++
++UbusNimBackend sBackend;
++
++} // namespace
++
++NimBackend & GetNimBackend()
++{
++    return sBackend;
++}
++
++CHIP_ERROR UbusNimBackend::EarlyInit()
++{
++    return mUbusManager.Init();
++}
++
++app::Clusters::ThreadBorderRouterManagement::Delegate & UbusNimBackend::BorderRouterDelegate()
++{
++    if (!mBorderRouterDelegate.has_value())
++    {
++        mBorderRouterDelegate.emplace(mUbusManager);
++    }
++    return *mBorderRouterDelegate;
++}
++
++CHIP_ERROR UbusNimBackend::StartWiFiCredentialSharing(app::Clusters::WiFiNetworkManagementCluster & cluster)
++{
++    // Nothing reads the router's access point configuration yet.
++    return CHIP_ERROR_NOT_IMPLEMENTED;
++}
++
++CHIP_ERROR UbusNimBackend::Start()
++{
++    // Publish the "matter" ubus object once the server is up; its handlers
++    // read commissioning state owned by the server.
++    return mService.Init();
++}
++
++void UbusNimBackend::Shutdown()
++{
++    mUbusManager.Shutdown();
++}
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/NimBackendUbus.h b/examples/network-manager-app/linux/NimBackendUbus.h
+new file mode 100644
+index 0000000000..0424ad34bb
+--- /dev/null
++++ b/examples/network-manager-app/linux/NimBackendUbus.h
+@@ -0,0 +1,49 @@
++/*
++ *
++ *    Copyright (c) 2026 Project CHIP Authors
++ *    All rights reserved.
++ *
++ *    Licensed under the Apache License, Version 2.0 (the "License");
++ *    you may not use this file except in compliance with the License.
++ *    You may obtain a copy of the License at
++ *
++ *        http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *    Unless required by applicable law or agreed to in writing, software
++ *    distributed under the License is distributed on an "AS IS" BASIS,
++ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *    See the License for the specific language governing permissions and
++ *    limitations under the License.
++ */
++
++#pragma once
++
++#include "MatterUbusService.h"
++#include "NimBackend.h"
++#include "ThreadBROpenThreadUbus.h"
++#include "UbusManager.h"
++
++#include <optional>
++
++namespace chip {
++
++// OpenWrt: otbr-agent for Thread and a "matter" ubus object for the router's
++// own UI, over ubus.
++class UbusNimBackend final : public NimBackend
++{
++public:
++    const char * Name() const override { return "OpenWrt (ubus)"; }
++
++    CHIP_ERROR EarlyInit() override;
++    app::Clusters::ThreadBorderRouterManagement::Delegate & BorderRouterDelegate() override;
++    CHIP_ERROR StartWiFiCredentialSharing(app::Clusters::WiFiNetworkManagementCluster & cluster) override;
++    CHIP_ERROR Start() override;
++    void Shutdown() override;
++
++private:
++    ubus::UbusManager mUbusManager{};
++    MatterUbusService mService{ mUbusManager };
++    std::optional<OpenThreadUbusBorderRouterDelegate> mBorderRouterDelegate;
++};
++
++} // namespace chip
+diff --git a/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h b/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
+index fb2ed7e32a..40db276cd0 100644
+--- a/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
++++ b/examples/network-manager-app/linux/include/CHIPProjectAppConfig.h
+@@ -29,9 +29,5 @@
+ // Sufficient space for ArlReviewEvent of several fabrics.
+ #define CHIP_DEVICE_CONFIG_EVENT_LOGGING_INFO_BUFFER_SIZE (32 * 1024)
+ 
+-#ifndef MATTER_ENABLE_UBUS
+-#define MATTER_ENABLE_UBUS 0
+-#endif
+-
+ // Inherit defaults from config/standalone/CHIPProjectConfig.h
+ #include <CHIPProjectConfig.h>
+diff --git a/examples/network-manager-app/linux/main.cpp b/examples/network-manager-app/linux/main.cpp
+index a086f58508..cf831a7a46 100644
+--- a/examples/network-manager-app/linux/main.cpp
++++ b/examples/network-manager-app/linux/main.cpp
+@@ -28,13 +28,7 @@
+ #include <lib/support/CodeUtils.h>
+ #include <lib/support/Span.h>
+ 
+-#if MATTER_ENABLE_UBUS
+-#include "MatterUbusService.h"
+-#include "ThreadBROpenThreadUbus.h"
+-#include "UbusManager.h"
+-#else
+-#include "ThreadBRFake.h"
+-#endif
++#include "NimBackend.h"
+ 
+ #include <optional>
+ 
+@@ -42,12 +36,11 @@ using namespace chip;
+ using namespace chip::app;
+ using namespace chip::app::Clusters;
+ 
+-#if MATTER_ENABLE_UBUS
+-ubus::UbusManager gUbusManager{};
+-MatterUbusService gMatterUbusService{ gUbusManager };
+-#endif
++// Everything in this file is the same for every operating system the
++// network manager runs on; what differs lives behind NimBackend.
+ 
+ std::optional<DefaultThreadNetworkDirectoryServer> gThreadNetworkDirectoryServer;
++
+ void emberAfThreadNetworkDirectoryClusterInitCallback(EndpointId endpoint)
+ {
+     VerifyOrDie(!gThreadNetworkDirectoryServer);
+@@ -55,6 +48,7 @@ void emberAfThreadNetworkDirectoryClusterInitCallback(EndpointId endpoint)
+ }
+ 
+ std::optional<WiFiNetworkManagementServer> gWiFiNetworkManagementServer;
++
+ void emberAfWiFiNetworkManagementClusterInitCallback(EndpointId endpoint)
+ {
+     VerifyOrDie(!gWiFiNetworkManagementServer);
+@@ -62,16 +56,12 @@ void emberAfWiFiNetworkManagementClusterInitCallback(EndpointId endpoint)
+ }
+ 
+ std::optional<ThreadBorderRouterManagement::ServerInstance> gThreadBorderRouterManagementServer;
++
+ void emberAfThreadBorderRouterManagementClusterInitCallback(EndpointId endpoint)
+ {
+     VerifyOrDie(!gThreadBorderRouterManagementServer);
+-#if MATTER_ENABLE_UBUS
+-    static OpenThreadUbusBorderRouterDelegate delegate{ gUbusManager };
+-#else
+-    static FakeBorderRouterDelegate delegate{};
+-#endif
+     TEMPORARY_RETURN_IGNORED gThreadBorderRouterManagementServer
+-        .emplace(endpoint, &delegate, Server::GetInstance().GetFailSafeContext())
++        .emplace(endpoint, &GetNimBackend().BorderRouterDelegate(), Server::GetInstance().GetFailSafeContext())
+         .Init();
+ }
+ 
+@@ -98,27 +88,31 @@ void emberAfNetworkIdentityManagementClusterInitCallback(EndpointId endpoint)
+ 
+ static void ApplicationEarlyInit()
+ {
+-#if MATTER_ENABLE_UBUS
+-    SuccessOrDie(gUbusManager.Init());
+-#endif
++    ChipLogProgress(AppServer, "Network manager backend: %s", GetNimBackend().Name());
++    SuccessOrDie(GetNimBackend().EarlyInit());
+ }
+ 
+ void ApplicationInit()
+ {
+-    TEMPORARY_RETURN_IGNORED gWiFiNetworkManagementServer->SetNetworkCredentials(ByteSpan::fromCharSpan("MatterAP"_span),
+-                                                                                 ByteSpan::fromCharSpan("Setec Astronomy"_span));
+-#if MATTER_ENABLE_UBUS
+-    // Publish the "matter" ubus object once the server is up; its handlers
+-    // read commissioning state owned by the server.
+-    SuccessOrDie(gMatterUbusService.Init());
+-#endif
++    // Without credentials the cluster's SSID reads null and
++    // NetworkPassphraseRequest fails with InvalidInState, which is the right
++    // answer for a node that shares nothing.
++    CHIP_ERROR err = GetNimBackend().StartWiFiCredentialSharing(*gWiFiNetworkManagementServer);
++    if (err == CHIP_ERROR_NOT_IMPLEMENTED)
++    {
++        ChipLogProgress(AppServer, "Wi-Fi credential sharing disabled");
++    }
++    else
++    {
++        SuccessOrDie(err);
++    }
++
++    SuccessOrDie(GetNimBackend().Start());
+ }
+ 
+ void ApplicationShutdown()
+ {
+-#if MATTER_ENABLE_UBUS
+-    gUbusManager.Shutdown();
+-#endif
++    GetNimBackend().Shutdown();
+ }
+ 
+ int main(int argc, char * argv[])

@@ -23,9 +23,105 @@ start_service() {
 	. /usr/share/matter/bootstrap.sh
 
 	procd_open_instance
-	procd_set_param command /bin/sh -c 'umask 027; exec "$@"' - "$PROG"
+	procd_set_param command /bin/sh -c 'umask 027; exec "$@"' - "$PROG" $(matter_args)
+	local vendor_name product_name
+	config_load matter
+	config_get vendor_name settings vendor_name ""
+	config_get product_name settings product_name ""
+	# Appended separately so a multi-word name stays one argument.
+	[ -n "$vendor_name" ] && procd_append_param command --vendor-name "$vendor_name"
+	[ -n "$product_name" ] && procd_append_param command --product-name "$product_name"
 	procd_set_param user matter
 	procd_set_param group matter
-	procd_set_param respawn
+	# Retry indefinitely: a start that loses a port race with a dying
+	# predecessor must not strand the service in procd's crash-loop state.
+	procd_set_param respawn 3600 5 0
 	procd_close_instance
+}
+
+restart() {
+	# procd's stop is asynchronous, and the daemon needs a moment to tear
+	# the Matter server down; starting over it loses the port race and
+	# dies with "Address in use". Wait for the old instance to be gone.
+	stop "$@"
+	local i=0
+	while pidof matter-network-manager-app >/dev/null && [ "$i" -lt 30 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	start "$@"
+}
+
+service_triggers() {
+	procd_add_reload_trigger "matter" "wireless" "network"
+}
+
+wifi_args() {
+	local wifi_share wifi_network wifi_iface
+
+	config_load matter
+	config_get_bool wifi_share settings wifi_share 1
+	config_get wifi_network settings wifi_network "lan"
+	config_get wifi_iface settings wifi_iface ""
+	if [ "$wifi_share" = 0 ]; then
+		echo -n "--no-wifi-share"
+		return
+	fi
+
+	echo -n "--wifi-network $wifi_network"
+	[ -n "$wifi_iface" ] && echo -n " --wifi-iface $wifi_iface"
+}
+
+interface_args() {
+	local primary diag eth_diag
+
+	config_load matter
+	config_get primary settings primary_interface "br-lan"
+	config_get diag settings diagnostics_interface ""
+	config_get_bool eth_diag settings ethernet_diagnostics 1
+	echo -n "--primary-interface $primary"
+	[ -z "$diag" ] || echo -n " --diagnostics-interface $diag"
+	[ "$eth_diag" = 1 ] || echo -n " --no-ethernet-diagnostics"
+}
+
+thread_args() {
+	# Without the border router there is no Thread network to manage.
+	[ -x /usr/sbin/otbr-agent ] || echo -n "--no-thread"
+}
+
+matter_args() {
+	local args thread
+
+	args="$(wifi_args) $(interface_args)"
+	thread="$(thread_args)"
+	[ -n "$thread" ] && args="$args $thread"
+	echo -n "$args"
+}
+
+reload_service() {
+	local pid running
+
+	# Which access point to share is a command line argument, so a changed
+	# configuration needs a restart; a changed wireless configuration only
+	# needs the daemon to re-read the credentials of the same access point,
+	# which keeps the Matter sessions up.
+	pid="$(pidof matter-network-manager-app)"
+	# First PID only, and never read /proc//cmdline (the kernel command
+	# line) when the daemon is not running at all.
+	pid="${pid%% *}"
+	running=""
+	[ -n "$pid" ] && running="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+	local vendor_name product_name
+	config_load matter
+	config_get vendor_name settings vendor_name ""
+	config_get product_name settings product_name ""
+	# Compare the whole command line, not a substring: an option that was
+	# removed leaves the expected arguments a prefix of the running ones,
+	# which must count as a change. echo collapses the whitespace.
+	# shellcheck disable=SC2086 # word splitting collapses the whitespace
+	if [ "$(set -f; echo $running)" = "$(set -f; echo "$PROG" $(matter_args)${vendor_name:+ --vendor-name $vendor_name}${product_name:+ --product-name $product_name})" ]; then
+		ubus call matter reload_wifi
+	else
+		restart
+	fi
 }

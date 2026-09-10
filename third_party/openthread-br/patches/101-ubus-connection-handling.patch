@@ -1,4 +1,4 @@
-From c735382f18325a47a8fcae280893b4527a510982 Mon Sep 17 00:00:00 2001
+From 02a21012607733c442fe57b7fc2636daf5557b9d Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 2 Oct 2025 13:09:47 +1300
 Subject: [PATCH] Ubus: Move connection logic into UBusAgent and reduce
@@ -10,7 +10,7 @@ Subject: [PATCH] Ubus: Move connection logic into UBusAgent and reduce
  2 files changed, 84 insertions(+), 144 deletions(-)
 
 diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
-index 5d2724a8..a18af82a 100644
+index 5c2a698a..be85f1e5 100644
 --- a/src/openwrt/ubus/otubus.cpp
 +++ b/src/openwrt/ubus/otubus.cpp
 @@ -53,9 +53,8 @@ const static int PANID_LENGTH      = 10;
@@ -57,7 +57,7 @@ index 5d2724a8..a18af82a 100644
      blob_buf_init(&mScanBuf, 0);
      mScanArray = blobmsg_open_array(&mScanBuf, "scan_list");
  
-@@ -1596,93 +1595,11 @@ void UbusServer::GetState(otInstance *aInstance, char *aState)
+@@ -1597,93 +1596,11 @@ void UbusServer::GetState(otInstance *aInstance, char *aState)
      }
  }
  
@@ -153,7 +153,7 @@ index 5d2724a8..a18af82a 100644
      }
  }
  
-@@ -1818,12 +1735,58 @@ void UloopProcessor::Process(const MainloopContext &aMainloop)
+@@ -1819,12 +1736,58 @@ void UloopProcessor::Process(const MainloopContext &aMainloop)
  
  // === UBusAgent ===
  
@@ -364,6 +364,3 @@ index 77e4237c..6396dfa9 100644
      otbr::Host::RcpHost &mHost;
  };
  } // namespace ubus
--- 
-2.50.1 (Apple Git-155)
-

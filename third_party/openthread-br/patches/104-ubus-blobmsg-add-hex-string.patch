@@ -1,4 +1,4 @@
-From 05b59334a5966b455115c88d21a7b8d4df3589fd Mon Sep 17 00:00:00 2001
+From d37de933c539c75e7cb77a20a15991bfbf442f9c Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Fri, 3 Oct 2025 17:49:01 +1300
 Subject: [PATCH] Ubus: Add blobmsg_add_hex_string for emitting hex values
@@ -27,7 +27,7 @@ index 8e868f2b..714a759f 100644
  target_link_libraries(otbr-ubus PRIVATE
      otbr-config
 diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
-index 05b7cf99..114d36bf 100644
+index 4a641e93..ae1d7d60 100644
 --- a/src/openwrt/ubus/otubus.cpp
 +++ b/src/openwrt/ubus/otubus.cpp
 @@ -50,9 +50,6 @@ namespace ubus {
@@ -312,6 +312,3 @@ index 74a8da29..dfd3c990 100644
  } // namespace ubus
  } // namespace otbr
  
--- 
-2.50.1 (Apple Git-155)
-
