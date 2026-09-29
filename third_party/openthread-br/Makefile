@@ -57,7 +57,7 @@ define Package/openthread-br/Default
   CATEGORY:=Network
   TITLE:=OpenThread Border Router
   URL:=https://github.com/openthread/ot-br-posix
-  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libubox +kmod-usb-acm +kmod-tun +jsonfilter
+  DEPENDS:=+libstdcpp +OPENTHREADBR_SHARED_MBEDTLS:libmbedtls +libjson-c +libubus +libubox +libmnl +libnftnl +kmod-nft-core +kmod-usb-acm +kmod-tun +jsonfilter
 endef
 
 define Package/openthread-br/Default/description
@@ -91,7 +91,14 @@ config OPENTHREADBR_SHARED_MBEDTLS
 endif
 endef
 
-# Disable firewall integration due to https://github.com/openthread/ot-br-posix/issues/1675
+# OTBR_NFTABLES: otbr-agent installs the Thread ingress filter in-process,
+# through nftables in a table of its own (inet otbr_<thread-if>), and the
+# build turns the OT posix platform firewall (ipset/ip6tables) off with
+# it. Needs nf_tables support at runtime (kmod-nft-core): with the
+# backend compiled in, a failed firewall install aborts the agent rather
+# than silently forwarding unfiltered traffic. The agent puts the table
+# back when something else deletes it (`fw4 flush`, say). The NAT44
+# masquerade is only installed with OTBR_NAT64, which is off here.
 CMAKE_OPTIONS+= \
 	-DOTBR_GIT_VERSION=$(call GitWithMetadata/resolve,OTBR_GIT_VERSION)$(if $(PKG_RELEASE),-r$(PKG_RELEASE)) \
 	-DOT_PACKAGE_VERSION=$(call GitWithMetadata/resolve,OT_GIT_VERSION) \
@@ -103,9 +110,9 @@ CMAKE_OPTIONS+= \
 	-DOTBR_BORDER_AGENT=ON \
 	-DOTBR_BORDER_ROUTING=ON \
 	-DOTBR_NAT64=OFF \
+	-DOTBR_NFTABLES=ON \
 	-DOTBR_SETTINGS_FILE_USE_INTERFACE_NAME=ON \
 	-DOT_POSIX_SETTINGS_PATH=\"/etc/openthread\" \
-	-DOT_FIREWALL=OFF \
 	-DOT_READLINE=OFF
 
 TARGET_CFLAGS+= \
