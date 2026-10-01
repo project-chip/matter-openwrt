@@ -17,6 +17,7 @@
             ]
         }
     },
+    "publish": [ "matter" ],
     "subscribe": [ "otbr", "uci", "service" ],
     "listen": [ "ubus.object.*", "uci", "network.interface" ]
 }
