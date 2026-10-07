@@ -1,4 +1,4 @@
-From 1f56fbac66f0d545a43c5f6f46c5eba78e57ddc5 Mon Sep 17 00:00:00 2001
+From 9239cabf0d8e9f38eca0c54c6158ab5a26a732eb Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 2 Oct 2025 08:10:30 +1300
 Subject: [PATCH] Ubus: Move ubus / uloop integration onto the main thread
@@ -9,17 +9,15 @@ overall and aligns with how the DBus integration is implemented.
 
 Also remove unused blobmsg_json dependency.
 ---
- src/agent/application.cpp       |  11 +-
+ src/agent/application.cpp       |   5 +
  src/openwrt/ubus/CMakeLists.txt |   2 -
  src/openwrt/ubus/otubus.cpp     | 226 ++++++++++++++------------------
  src/openwrt/ubus/otubus.hpp     |  72 +++++-----
- 4 files changed, 145 insertions(+), 166 deletions(-)
+ 4 files changed, 145 insertions(+), 160 deletions(-)
 
-diff --git a/src/agent/application.cpp b/src/agent/application.cpp
-index fe2aa55b..751622c0 100644
 --- a/src/agent/application.cpp
 +++ b/src/agent/application.cpp
-@@ -100,6 +100,11 @@ void Application::Init(const std::string &aRestListenAddress, int aRestListenPor
+@@ -123,6 +123,11 @@ void Application::Init(const std::string
  {
      CoprocessorType type;
  
@@ -31,21 +29,6 @@ index fe2aa55b..751622c0 100644
      mHost.Init();
  
      type = mHost.GetCoprocessorType();
-@@ -173,12 +178,6 @@ otbrError Application::Run(void)
-     }
- #endif
- 
--    // allow quitting elegantly
--    signal(SIGTERM, HandleSignal);
--
--    // avoid exiting on SIGPIPE
--    signal(SIGPIPE, SIG_IGN);
--
-     while (!sShouldTerminate)
-     {
-         otbr::MainloopContext mainloop;
-diff --git a/src/openwrt/ubus/CMakeLists.txt b/src/openwrt/ubus/CMakeLists.txt
-index 9d0a086e..8e868f2b 100644
 --- a/src/openwrt/ubus/CMakeLists.txt
 +++ b/src/openwrt/ubus/CMakeLists.txt
 @@ -35,6 +35,4 @@ target_link_libraries(otbr-ubus PRIVATE
@@ -55,8 +38,6 @@ index 9d0a086e..8e868f2b 100644
 -    blobmsg_json
 -    json-c
  )
-diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
-index 45b9ed4e..5d2724a8 100644
 --- a/src/openwrt/ubus/otubus.cpp
 +++ b/src/openwrt/ubus/otubus.cpp
 @@ -34,23 +34,18 @@
@@ -99,7 +80,7 @@ index 45b9ed4e..5d2724a8 100644
      , mSecond(0)
  {
      memset(&mNetworkdataBuf, 0, sizeof(mNetworkdataBuf));
-@@ -78,9 +71,9 @@ UbusServer &UbusServer::GetInstance(void)
+@@ -78,9 +71,9 @@ UbusServer &UbusServer::GetInstance(void
      return *sUbusServerInstance;
  }
  
@@ -132,7 +113,7 @@ index 45b9ed4e..5d2724a8 100644
  void UbusServer::HandleActiveScanResult(otActiveScanResult *aResult, void *aContext)
  {
      static_cast<UbusServer *>(aContext)->HandleActiveScanResultDetail(aResult);
-@@ -267,28 +246,30 @@ void UbusServer::HandleActiveScanResultDetail(otActiveScanResult *aResult)
+@@ -267,28 +246,30 @@ void UbusServer::HandleActiveScanResultD
  
      if (aResult == nullptr)
      {
@@ -173,7 +154,7 @@ index 45b9ed4e..5d2724a8 100644
  
  exit:
      return;
-@@ -313,31 +294,24 @@ int UbusServer::UbusScanHandlerDetail(struct ubus_context      *aContext,
+@@ -313,31 +294,24 @@ int UbusServer::UbusScanHandlerDetail(st
      OT_UNUSED_VARIABLE(aMethod);
      OT_UNUSED_VARIABLE(aMsg);
  
@@ -218,7 +199,7 @@ index 45b9ed4e..5d2724a8 100644
      return 0;
  }
  
-@@ -675,26 +649,16 @@ int UbusServer::UbusLeaveHandlerDetail(struct ubus_context      *aContext,
+@@ -675,26 +649,16 @@ int UbusServer::UbusLeaveHandlerDetail(s
      OT_UNUSED_VARIABLE(aMethod);
      OT_UNUSED_VARIABLE(aMsg);
  
@@ -252,7 +233,7 @@ index 45b9ed4e..5d2724a8 100644
      return 0;
  }
  int UbusServer::UbusThreadHandler(struct ubus_context      *aContext,
-@@ -714,19 +678,16 @@ int UbusServer::UbusThreadHandler(struct ubus_context      *aContext,
+@@ -714,19 +678,16 @@ int UbusServer::UbusThreadHandler(struct
  
      if (!strcmp(aAction, "start"))
      {
@@ -272,7 +253,7 @@ index 45b9ed4e..5d2724a8 100644
      AppendResult(error, aContext, aRequest);
      return 0;
  }
-@@ -750,7 +711,6 @@ int UbusServer::UbusParentHandlerDetail(struct ubus_context      *aContext,
+@@ -750,7 +711,6 @@ int UbusServer::UbusParentHandlerDetail(
  
      blob_buf_init(&mBuf, 0);
  
@@ -280,7 +261,7 @@ index 45b9ed4e..5d2724a8 100644
      SuccessOrExit(error = otThreadGetParentInfo(mHost->GetInstance(), &parentInfo));
  
      jsonArray = blobmsg_open_array(&mBuf, "parent_list");
-@@ -772,7 +732,6 @@ int UbusServer::UbusParentHandlerDetail(struct ubus_context      *aContext,
+@@ -772,7 +732,6 @@ int UbusServer::UbusParentHandlerDetail(
      blobmsg_close_array(&mBuf, jsonArray);
  
  exit:
@@ -288,7 +269,7 @@ index 45b9ed4e..5d2724a8 100644
      AppendResult(error, aContext, aRequest);
      return error;
  }
-@@ -799,7 +758,6 @@ int UbusServer::UbusNeighborHandlerDetail(struct ubus_context      *aContext,
+@@ -799,7 +758,6 @@ int UbusServer::UbusNeighborHandlerDetai
  
      sJsonUri = blobmsg_open_array(&mBuf, "neighbor_list");
  
@@ -296,7 +277,7 @@ index 45b9ed4e..5d2724a8 100644
      while (otThreadGetNextNeighborInfo(mHost->GetInstance(), &iterator, &neighborInfo) == OT_ERROR_NONE)
      {
          jsonList = blobmsg_open_table(&mBuf, nullptr);
-@@ -847,8 +805,6 @@ int UbusServer::UbusNeighborHandlerDetail(struct ubus_context      *aContext,
+@@ -847,8 +805,6 @@ int UbusServer::UbusNeighborHandlerDetai
  
      blobmsg_close_array(&mBuf, sJsonUri);
  
@@ -305,7 +286,7 @@ index 45b9ed4e..5d2724a8 100644
      AppendResult(error, aContext, aRequest);
      return 0;
  }
-@@ -944,8 +900,6 @@ int UbusServer::UbusCommissioner(struct ubus_context      *aContext,
+@@ -944,8 +900,6 @@ int UbusServer::UbusCommissioner(struct
  
      otError error = OT_ERROR_NONE;
  
@@ -314,7 +295,7 @@ index 45b9ed4e..5d2724a8 100644
      if (!strcmp(aAction, "start"))
      {
          if (otCommissionerGetState(mHost->GetInstance()) == OT_COMMISSIONER_STATE_DISABLED)
-@@ -1010,7 +964,6 @@ int UbusServer::UbusCommissioner(struct ubus_context      *aContext,
+@@ -1010,7 +964,6 @@ int UbusServer::UbusCommissioner(struct
      }
  
  exit:
@@ -322,7 +303,7 @@ index 45b9ed4e..5d2724a8 100644
      blob_buf_init(&mBuf, 0);
      AppendResult(error, aContext, aRequest);
      return 0;
-@@ -1087,7 +1040,6 @@ int UbusServer::UbusGetInformation(struct ubus_context      *aContext,
+@@ -1087,7 +1040,6 @@ int UbusServer::UbusGetInformation(struc
  
      blob_buf_init(&mBuf, 0);
  
@@ -330,7 +311,7 @@ index 45b9ed4e..5d2724a8 100644
      if (!strcmp(aAction, "networkname"))
          blobmsg_add_string(&mBuf, "NetworkName", otThreadGetNetworkName(mHost->GetInstance()));
      else if (!strcmp(aAction, "interfacename"))
-@@ -1303,7 +1255,6 @@ int UbusServer::UbusGetInformation(struct ubus_context      *aContext,
+@@ -1303,7 +1255,6 @@ int UbusServer::UbusGetInformation(struc
  
      AppendResult(error, aContext, aRequest);
  exit:
@@ -338,7 +319,7 @@ index 45b9ed4e..5d2724a8 100644
      return 0;
  }
  
-@@ -1439,7 +1390,6 @@ int UbusServer::UbusSetInformation(struct ubus_context      *aContext,
+@@ -1439,7 +1390,6 @@ int UbusServer::UbusSetInformation(struc
  
      blob_buf_init(&mBuf, 0);
  
@@ -346,7 +327,7 @@ index 45b9ed4e..5d2724a8 100644
      if (!strcmp(aAction, "networkname"))
      {
          struct blob_attr *tb[SET_NETWORK_MAX];
-@@ -1613,7 +1563,6 @@ int UbusServer::UbusSetInformation(struct ubus_context      *aContext,
+@@ -1614,7 +1564,6 @@ int UbusServer::UbusSetInformation(struc
      }
  
  exit:
@@ -354,7 +335,7 @@ index 45b9ed4e..5d2724a8 100644
      AppendResult(error, aContext, aRequest);
      return 0;
  }
-@@ -1692,9 +1641,6 @@ void UbusServer::UbusConnectionLost(struct ubus_context *aContext)
+@@ -1693,9 +1642,6 @@ void UbusServer::UbusConnectionLost(stru
  
  int UbusServer::DisplayUbusInit(const char *aPath)
  {
@@ -364,7 +345,7 @@ index 45b9ed4e..5d2724a8 100644
      mSockPath = aPath;
  
      mContext = ubus_connect(aPath);
-@@ -1738,13 +1684,6 @@ void UbusServer::InstallUbusObject(void)
+@@ -1739,13 +1685,6 @@ void UbusServer::InstallUbusObject(void)
          otbrLogErr("Ubus connect failed");
          return;
      }
@@ -378,7 +359,7 @@ index 45b9ed4e..5d2724a8 100644
  }
  
  otError UbusServer::ParseLong(char *aString, long &aLong)
-@@ -1805,52 +1744,85 @@ exit:
+@@ -1806,52 +1745,85 @@ exit:
      return rval;
  }
  
@@ -493,8 +474,6 @@ index 45b9ed4e..5d2724a8 100644
  }
  
  } // namespace ubus
-diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
-index f87e9c1c..77e4237c 100644
 --- a/src/openwrt/ubus/otubus.hpp
 +++ b/src/openwrt/ubus/otubus.hpp
 @@ -36,6 +36,7 @@
@@ -630,6 +609,3 @@ index f87e9c1c..77e4237c 100644
  };
  } // namespace ubus
  } // namespace otbr
--- 
-2.50.1 (Apple Git-155)
-

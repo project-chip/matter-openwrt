@@ -1,4 +1,4 @@
-From 270d44915e4d64c51e02ce5f8297d4282e827dc7 Mon Sep 17 00:00:00 2001
+From 4e6bdc8e61569f9f204b56f9a4acd92b3ddebda0 Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Sat, 4 Oct 2025 01:44:01 +1300
 Subject: [PATCH] Ubus: Add methods and notifications for Matter integration
@@ -13,8 +13,6 @@ changes without polling.
  src/openwrt/ubus/otubus.hpp |   8 +++
  2 files changed, 116 insertions(+)
 
-diff --git a/src/openwrt/ubus/otubus.cpp b/src/openwrt/ubus/otubus.cpp
-index a8254044..b25261d5 100644
 --- a/src/openwrt/ubus/otubus.cpp
 +++ b/src/openwrt/ubus/otubus.cpp
 @@ -39,6 +39,10 @@
@@ -28,7 +26,7 @@ index a8254044..b25261d5 100644
  namespace otbr {
  namespace ubus {
  
-@@ -74,6 +78,19 @@ static char const *DeviceRoleToString(otDeviceRole aRole)
+@@ -74,6 +78,19 @@ static char const *DeviceRoleToString(ot
      return string;
  }
  
@@ -64,7 +62,7 @@ index a8254044..b25261d5 100644
  }
  
  UbusServer::~UbusServer()
-@@ -1095,6 +1120,85 @@ int UbusServer::HandleMacFilterClear(ubus_request_data *aRequest)
+@@ -1095,6 +1120,85 @@ int UbusServer::HandleMacFilterClear(ubu
      return 0;
  }
  
@@ -150,7 +148,7 @@ index a8254044..b25261d5 100644
  const ubus_method UbusServer::sMethods[] = {
      OTBR_UBUS_METHOD_NOARG("channel", &UbusServer::HandleChannel),
      OTBR_UBUS_METHOD("setchannel", &UbusServer::HandleSetChannel, kSetChannelPolicy),
-@@ -1137,6 +1241,10 @@ const ubus_method UbusServer::sMethods[] = {
+@@ -1137,6 +1241,10 @@ const ubus_method UbusServer::sMethods[]
      OTBR_UBUS_METHOD_NOARG("macfilterstate", &UbusServer::HandleMacFilterState),
      OTBR_UBUS_METHOD("macfiltersetstate", &UbusServer::HandleMacFilterSetState, kMacfilterSetStatePolicy),
      OTBR_UBUS_METHOD_NOARG("macfilteraddr", &UbusServer::HandleMacFilterAddr),
@@ -161,8 +159,6 @@ index a8254044..b25261d5 100644
  };
  
  ubus_object_type UbusServer::sObjectType = UBUS_OBJECT_TYPE("otbr", sMethods);
-diff --git a/src/openwrt/ubus/otubus.hpp b/src/openwrt/ubus/otubus.hpp
-index 676a10b9..02c49116 100644
 --- a/src/openwrt/ubus/otubus.hpp
 +++ b/src/openwrt/ubus/otubus.hpp
 @@ -116,6 +116,10 @@ private:
@@ -187,6 +183,3 @@ index 676a10b9..02c49116 100644
      // === Internal helpers ===
  
      static UbusServer &PrepareInvocation(ubus_object *aObj, ubus_request_data *aRequest, const char *aMethod);
--- 
-2.50.1 (Apple Git-155)
-
