@@ -16,12 +16,12 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mDNSResponder
-PKG_VERSION:=2881.0.25
+PKG_VERSION:=2881.100.56.0.1
 PKG_RELEASE:=1
 
 PKG_SOURCE:=mDNSResponder-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://github.com/apple-oss-distributions/mDNSResponder/archive/refs/tags
-PKG_HASH:=aa6718b757dcccb9fc6549e0f566cd03eaa7314426f2856e0da08c966d7da41c
+PKG_HASH:=89b2e97427a406b7369646ef6b49e773a473b6d091767a7a59bf48e2a7821a2b
 
 # Use local source dir for development
 # USE_SOURCE_DIR:=$(HOME)/workspace/mDNSResponder
