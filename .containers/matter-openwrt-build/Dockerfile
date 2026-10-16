@@ -2,6 +2,20 @@ ARG OPENWRT_VERSION=25.12.5
 FROM ghcr.io/openwrt/sdk:x86-generic-${OPENWRT_VERSION}
 LABEL org.opencontainers.image.description="Pre-warmed OpenWrt SDK"
 
+# The SDK image is based on Debian 11 (bullseye), which is EOL and has moved to archive.debian.org.
+# Its stock ca-certificates (2021) lacks newer roots such as GlobalSign Root E46, which makes curl
+# fail with "unable to get local issuer certificate" when downloading from some upstream hosts.
+# The check makes this step fail loudly once the SDK image moves to a newer base, so it can be dropped.
+USER root
+RUN set -x && \
+    grep -q '^11\.' /etc/debian_version && \
+    sed -i -E 's|^deb http://deb\.debian\.org/|deb http://archive.debian.org/|' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+USER buildbot
+
 # Core packages to pre-build to speed up CI builds
 ARG SRC_PACKAGES="glib2 openssl ubus avahi python3/host"
 ARG CFG_PACKAGES="glib2 libopenssl libubus libavahi-client"
