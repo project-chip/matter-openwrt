@@ -1,0 +1,22 @@
+From eee110a17ada02388a18b602a9922b936b3475fb Mon Sep 17 00:00:00 2001
+From: Karsten Sperling <ksperling@apple.com>
+Date: Wed, 14 Oct 2026 12:25:34 +1300
+Subject: [PATCH] Fix stray reference to AWDL symbol missing in open source
+
+---
+ mDNSShared/uds_daemon.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mDNSShared/uds_daemon.c b/mDNSShared/uds_daemon.c
+index 6486f1e..ecbd928 100644
+--- a/mDNSShared/uds_daemon.c
++++ b/mDNSShared/uds_daemon.c
+@@ -3626,7 +3626,7 @@ mDNSlocal void resolve_result_callback(mDNS *const m, DNSQuestion *question, con
+     request_state *const req = question->QuestionContext;
+     const mDNSu32 name_hash = mDNS_DomainNameFNV1aHash(&question->qname);
+     const mDNSBool isMDNSQuestion = mDNSOpaque16IsZero(question->TargetQID);
+-    const mDNSBool is_split_awdl_query = (req->resolve_awdl && question->InterfaceID == AWDLInterfaceID);
++    const mDNSBool is_split_awdl_query = mDNSfalse;
+     UDS_LOG_ANSWER_EVENT(isMDNSQuestion ? MDNS_LOG_CATEGORY_MDNS : MDNS_LOG_CATEGORY_DEFAULT, MDNS_LOG_DEFAULT,
+         req, question, answer, mDNSfalse, "DNSServiceResolve result", AddRecord);
+ 
