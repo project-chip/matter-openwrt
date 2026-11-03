@@ -21,9 +21,9 @@ PKG_SOURCE_PROTO:=git-with-metadata
 
 # Note: The commit picked for this package should be aligned with that of the
 # openthread-br package so that the underlying OpenThread version matches.
-PKG_SOURCE_DATE:=2026-05-22
-PKG_SOURCE_VERSION:=486c0e6c1c3fd657d1715e2d0ef9cac1ee2b8073
-PKG_MIRROR_HASH:=119d84cc60634a672ae662722c787a4ca5276fdf692606c12a05cf6dec5bd6b6
+PKG_SOURCE_DATE:=2026-09-29
+PKG_SOURCE_VERSION:=b78ae63eceb9112b133434f4ee44b032843b7569
+PKG_MIRROR_HASH:=494c776af09a3089abad597064a5441f344bdb92ace95d39f36201a2ad40b836
 
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=LICENSE

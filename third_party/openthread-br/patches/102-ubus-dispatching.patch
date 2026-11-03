@@ -1881,7 +1881,7 @@ Fix uninitialized otLinkModeConfig in "setmode" handler.
  otError UbusServer::ParseLong(char *aString, long &aLong)
  {
      char *endptr;
-@@ -1739,7 +1358,7 @@ void UloopProcessor::Process(const Mainl
+@@ -1740,7 +1359,7 @@ void UloopProcessor::Process(const Mainl
  UBusAgent::UBusAgent(otbr::Host::RcpHost &aHost)
      : ubus_context{}
      , uloop_timeout{}
@@ -1890,7 +1890,7 @@ Fix uninitialized otLinkModeConfig in "setmode" handler.
  {
  }
  
-@@ -1757,8 +1376,7 @@ void UBusAgent::Init()
+@@ -1758,8 +1377,7 @@ void UBusAgent::Init()
      VerifyOrDie(ubus_connect_ctx(&Context(), nullptr) == 0, "Unable to connect to ubus");
      UbusConnected();
  
@@ -2919,7 +2919,7 @@ Fix uninitialized otLinkModeConfig in "setmode" handler.
  };
  
  /**
-@@ -1088,7 +274,7 @@ private:
+@@ -1089,7 +275,7 @@ private:
  
      void UbusConnected();
  

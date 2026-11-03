@@ -1,4 +1,4 @@
-From 1aff52555b55e5f3ad86e6f21c56e46161a729ef Mon Sep 17 00:00:00 2001
+From 0b4695a1469866976169a4358f26bc26acf1163d Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 29 Jan 2026 13:01:03 +1300
 Subject: [PATCH] Add basic support for an RGB status LED
@@ -101,10 +101,10 @@ index 2034a2f..6243a32 100644
  /**
   * Function for translating SoftDevice error into OpenThread's one.
 diff --git a/src/src/radio.c b/src/src/radio.c
-index a626f68..f5fd0ba 100644
+index 84e7d2e..c7bbf9c 100644
 --- a/src/src/radio.c
 +++ b/src/src/radio.c
-@@ -446,6 +446,7 @@ otError otPlatRadioEnable(otInstance *aInstance)
+@@ -471,6 +471,7 @@ otError otPlatRadioEnable(otInstance *aInstance)
      {
          sDisabled = false;
          error     = OT_ERROR_NONE;
@@ -112,7 +112,7 @@ index a626f68..f5fd0ba 100644
      }
      else
      {
-@@ -464,6 +465,7 @@ otError otPlatRadioDisable(otInstance *aInstance)
+@@ -489,6 +490,7 @@ otError otPlatRadioDisable(otInstance *aInstance)
                      error = OT_ERROR_INVALID_STATE);
  
      sDisabled = true;
