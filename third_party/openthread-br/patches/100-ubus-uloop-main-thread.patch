@@ -1,4 +1,4 @@
-From 9239cabf0d8e9f38eca0c54c6158ab5a26a732eb Mon Sep 17 00:00:00 2001
+From d4754f2d478de3f0ee76da92bdd807c243cb9c7c Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Thu, 2 Oct 2025 08:10:30 +1300
 Subject: [PATCH] Ubus: Move ubus / uloop integration onto the main thread
@@ -7,28 +7,81 @@ This is a pre-requisite for sending ubus notifications based on Thread events
 or state changes in a thread-safe way. It also simplifies the integration
 overall and aligns with how the DBus integration is implemented.
 
+Also install the signal handlers at the start of Application::Init, before
+uloop_init() would install its own, and handle SIGINT, which uloop would
+otherwise take over.
+
 Also remove unused blobmsg_json dependency.
 ---
- src/agent/application.cpp       |   5 +
+ src/agent/application.cpp       |  47 ++++---
  src/openwrt/ubus/CMakeLists.txt |   2 -
- src/openwrt/ubus/otubus.cpp     | 226 ++++++++++++++------------------
- src/openwrt/ubus/otubus.hpp     |  72 +++++-----
- 4 files changed, 145 insertions(+), 160 deletions(-)
+ src/openwrt/ubus/otubus.cpp     | 227 ++++++++++++++------------------
+ src/openwrt/ubus/otubus.hpp     |  73 +++++-----
+ 4 files changed, 168 insertions(+), 181 deletions(-)
 
 --- a/src/agent/application.cpp
 +++ b/src/agent/application.cpp
-@@ -123,6 +123,11 @@ void Application::Init(const std::string
- {
-     CoprocessorType type;
+@@ -121,7 +121,31 @@ Application::Application(Host::ThreadHos
  
-+    // Set up signal handlers before initializing other components.
-+    signal(SIGTERM, HandleSignal); // allow quitting elegantly
-+    signal(SIGINT, HandleSignal);  // ... also on SIGINT
-+    signal(SIGPIPE, SIG_IGN);      // avoid exiting on SIGPIPE
+ void Application::Init(const std::string &aRestListenAddress, int aRestListenPort)
+ {
+-    CoprocessorType type;
++    struct sigaction sa{};
++    CoprocessorType  type;
 +
++    // Set up signal handlers before initializing other components.
++    sigemptyset(&sa.sa_mask);
++    sa.sa_flags = SA_RESETHAND;
++
++    // allow quitting elegantly
++    sa.sa_handler = HandleSignal;
++    if (sigaction(SIGTERM, &sa, nullptr) < 0)
++    {
++        otbrLogWarning("Failed to install SIGTERM handler: %s", strerror(errno));
++    }
++    if (sigaction(SIGINT, &sa, nullptr) < 0)
++    {
++        otbrLogWarning("Failed to install SIGINT handler: %s", strerror(errno));
++    }
++
++    // avoid exiting on SIGPIPE
++    sa.sa_handler = SIG_IGN;
++    sa.sa_flags   = 0;
++    if (sigaction(SIGPIPE, &sa, nullptr) < 0)
++    {
++        otbrLogWarning("Failed to ignore SIGPIPE: %s", strerror(errno));
++    }
+ 
      mHost.Init();
  
-     type = mHost.GetCoprocessorType();
+@@ -172,26 +196,7 @@ void Application::Deinit(void)
+ 
+ otbrError Application::Run(void)
+ {
+-    struct sigaction sa{};
+-    otbrError        error = OTBR_ERROR_NONE;
+-
+-    sigemptyset(&sa.sa_mask);
+-    sa.sa_flags = SA_RESETHAND;
+-
+-    // allow quitting elegantly
+-    sa.sa_handler = HandleSignal;
+-    if (sigaction(SIGTERM, &sa, nullptr) < 0)
+-    {
+-        otbrLogWarning("Failed to install SIGTERM handler: %s", strerror(errno));
+-    }
+-
+-    // avoid exiting on SIGPIPE
+-    sa.sa_handler = SIG_IGN;
+-    sa.sa_flags   = 0;
+-    if (sigaction(SIGPIPE, &sa, nullptr) < 0)
+-    {
+-        otbrLogWarning("Failed to ignore SIGPIPE: %s", strerror(errno));
+-    }
++    otbrError error = OTBR_ERROR_NONE;
+ 
+ #ifdef HAVE_LIBSYSTEMD
+     if (getenv("SYSTEMD_EXEC_PID") != nullptr)
 --- a/src/openwrt/ubus/CMakeLists.txt
 +++ b/src/openwrt/ubus/CMakeLists.txt
 @@ -35,6 +35,4 @@ target_link_libraries(otbr-ubus PRIVATE
@@ -359,7 +412,7 @@ Also remove unused blobmsg_json dependency.
  }
  
  otError UbusServer::ParseLong(char *aString, long &aLong)
-@@ -1806,52 +1745,85 @@ exit:
+@@ -1806,52 +1745,86 @@ exit:
      return rval;
  }
  
@@ -399,8 +452,9 @@ Also remove unused blobmsg_json dependency.
 +    VerifyOrDie(sInstance == nullptr, "Cannot initialize multiple uloop instances");
 +    VerifyOrDie(uloop_fd_set_cb == nullptr, "An uloop fd set callback is already installed");
 +    otbrLogDebug("Initializing uloop");
-+    sInstance       = this;
-+    uloop_fd_set_cb = &ULoopFDHandler;
++    sInstance            = this;
++    uloop_fd_set_cb      = &ULoopFDHandler;
++    uloop_handle_sigchld = false;
 +    uloop_init();
  }
  
@@ -549,7 +603,7 @@ Also remove unused blobmsg_json dependency.
  
      /**
       * This method detailly start scan.
-@@ -1075,7 +1064,35 @@ private:
+@@ -1075,7 +1064,36 @@ private:
      void AppendResult(otError aError, struct ubus_context *aContext, struct ubus_request_data *aRequest);
  };
  
@@ -567,7 +621,8 @@ Also remove unused blobmsg_json dependency.
 +     *
 +     * Note: uloop will install signal handlers for SIGINT and SIGTERM if none have been installed yet.
 +     * These handlers only work correctly when using the uloop main loop via uloop_run(). This means
-+     * our otbr::Application handlers MUST be installed before calling this method.
++     * our otbr::Application handlers MUST be installed before calling this method. uloop's SIGCHLD
++     * handling is disabled, since it would reap child processes that it did not start.
 +     */
 +    void Init();
 +
@@ -586,7 +641,7 @@ Also remove unused blobmsg_json dependency.
  {
  public:
      /**
-@@ -1085,7 +1102,6 @@ public:
+@@ -1085,7 +1103,6 @@ public:
       */
      UBusAgent(otbr::Host::RcpHost &aHost)
          : mHost(aHost)
@@ -594,7 +649,7 @@ Also remove unused blobmsg_json dependency.
      {
      }
  
-@@ -1094,14 +1110,8 @@ public:
+@@ -1094,14 +1111,8 @@ public:
       */
      void Init(void);
  

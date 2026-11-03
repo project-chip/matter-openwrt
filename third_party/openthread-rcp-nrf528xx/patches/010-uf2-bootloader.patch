@@ -1,4 +1,4 @@
-From e9727a7932fd5749911ae5881e4bc9f01de0457e Mon Sep 17 00:00:00 2001
+From 6ada9e0aeee8ac20fbb91ea029714c08401d6f7c Mon Sep 17 00:00:00 2001
 From: Karsten Sperling <ksperling@apple.com>
 Date: Wed, 28 Jan 2026 16:58:58 +1300
 Subject: [PATCH] Add support for UF2 boot loader with "1200 baud touch" reset.

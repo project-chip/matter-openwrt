@@ -31,7 +31,7 @@ include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=openthread-br
 PKG_VERSION:=2026.10.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_SOURCE_URL:=https://github.com/openthread/ot-br-posix.git
 PKG_SOURCE_PROTO:=git-with-metadata
 

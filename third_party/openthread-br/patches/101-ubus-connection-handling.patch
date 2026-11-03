@@ -151,7 +151,7 @@ Subject: [PATCH] Ubus: Move connection logic into UBusAgent and reduce
      }
  }
  
-@@ -1819,12 +1736,58 @@ void UloopProcessor::Process(const Mainl
+@@ -1820,12 +1737,58 @@ void UloopProcessor::Process(const Mainl
  
  // === UBusAgent ===
  
@@ -322,7 +322,7 @@ Subject: [PATCH] Ubus: Move connection logic into UBusAgent and reduce
  class UloopProcessor : public MainloopProcessor
  {
  public:
-@@ -1092,7 +1063,7 @@ private:
+@@ -1093,7 +1064,7 @@ private:
      static UloopProcessor *sInstance;
  };
  
@@ -331,7 +331,7 @@ Subject: [PATCH] Ubus: Move connection logic into UBusAgent and reduce
  {
  public:
      /**
-@@ -1100,17 +1071,23 @@ public:
+@@ -1101,17 +1072,23 @@ public:
       *
       * @param[in] aHost  A reference to the Thread controller.
       */
