@@ -50,16 +50,18 @@ generate_factory_ini() {
 	[ -n "$model" ] && echo "product-name=$model"
 }
 
+ensure_mod_own() { # path mode owner group
+	# avoid unnecessary flash writes: only chmod/chown if different
+	find "$1" -maxdepth 0 ! -perm "$2" -exec chmod "$2" -- {} \;
+	find "$1" -maxdepth 0 ! \( -user "$3" -a -group "$4" \) -exec chown "$3:$4" -- {} \;
+}
+
 matter_bootstrap() {
-	# create /etc/matter and /etc/matter/data if needed
-	if ! [ -d /etc/matter/data ]; then
-		if ! [ -d /etc/matter ]; then
-			mkdir -m 0750 /etc/matter
-			chgrp matter /etc/matter
-		fi
-		mkdir -m 0700 /etc/matter/data
-		chown matter:matter /etc/matter/data
-	fi
+	# create /etc/matter and /etc/matter/data if needed and ensure the
+	# permissions are correct (sysupgrade loses directory permissions).
+	mkdir -p /etc/matter/data
+	ensure_mod_own /etc/matter 0750 root matter
+	ensure_mod_own /etc/matter/data 0700 matter matter
 
 	# generate factory config if necessary
 	local ini=/etc/matter/chip_factory.ini
@@ -68,14 +70,6 @@ matter_bootstrap() {
 		( umask 277; generate_factory_ini >"${ini}.tmp" )
 		chown matter:matter "${ini}.tmp"
 		mv "${ini}.tmp" "$ini"
-	fi
-
-	# migration: /etc/matter used to be owned by matter
-	if ! [ -O /etc/matter ]; then
-		chmod 0400 /etc/matter/chip_factory.ini
-		chown matter:matter /etc/matter/chip_factory.ini
-		chmod 0750 /etc/matter
-		chown root:matter /etc/matter
 	fi
 
 	# migration: data used to live in /etc/matter directly
