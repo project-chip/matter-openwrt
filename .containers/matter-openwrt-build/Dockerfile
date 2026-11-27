@@ -1,5 +1,6 @@
 ARG OPENWRT_VERSION=25.12.6
-FROM ghcr.io/openwrt/sdk:x86-generic-${OPENWRT_VERSION}
+ARG OPENWRT_TARGET=x86-generic
+FROM ghcr.io/openwrt/sdk:${OPENWRT_TARGET}-${OPENWRT_VERSION}
 LABEL org.opencontainers.image.description="Pre-warmed OpenWrt SDK"
 
 # The SDK image is based on Debian 11 (bullseye), which is EOL and has moved to archive.debian.org.
